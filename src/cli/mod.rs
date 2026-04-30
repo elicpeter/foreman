@@ -1,12 +1,14 @@
 //! Clap command definitions and dispatch.
 //!
 //! `init` is implemented (phase 5); the remaining subcommands are filled in
-//! across later phases (`run` in phase 12, `status`/`resume` in phase 17, etc.).
+//! across later phases (`run` in phase 12, `plan` in phase 15, `status` /
+//! `resume` in phase 17, etc.).
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 pub mod init;
+pub mod plan;
 pub mod run;
 
 #[derive(Debug, Parser)]
@@ -28,6 +30,10 @@ pub enum Command {
     Plan {
         /// Free-form description of what to build.
         goal: String,
+        /// Overwrite an existing `plan.md`. Without this flag the command
+        /// refuses to clobber a hand-written or `foreman init` seed file.
+        #[arg(long)]
+        force: bool,
     },
     /// Execute the plan, advancing through phases until done or halted.
     Run,
@@ -41,7 +47,7 @@ pub enum Command {
 pub async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init => init::run(std::env::current_dir()?),
-        Command::Plan { goal: _ } => unimplemented!("`foreman plan` lands in phase 15"),
+        Command::Plan { goal, force } => plan::run(std::env::current_dir()?, goal, force).await,
         Command::Run => run::run(std::env::current_dir()?).await,
         Command::Status => unimplemented!("`foreman status` lands in phase 17"),
         Command::Resume => unimplemented!("`foreman resume` lands in phase 17"),
