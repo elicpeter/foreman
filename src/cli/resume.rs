@@ -15,7 +15,9 @@ use anyhow::Result;
 use super::run::{execute, StartMode};
 
 /// Top-level entry point for the `resume` subcommand. `tui` toggles the
-/// `ratatui` dashboard the same way [`crate::cli::run::run`] does.
-pub async fn run(workspace: PathBuf, tui: bool) -> Result<()> {
-    execute(workspace, tui, StartMode::Resume).await
+/// `ratatui` dashboard the same way [`crate::cli::run::run`] does. `pr` opts
+/// the resumed run into the post-run `gh pr create` step (see
+/// [`crate::cli::run::run`]).
+pub async fn run(workspace: PathBuf, tui: bool, pr: bool) -> Result<()> {
+    execute(workspace, tui, pr, StartMode::Resume).await
 }

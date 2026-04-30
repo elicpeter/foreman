@@ -303,6 +303,14 @@ impl<A: Agent, G: Git> Runner<A, G> {
         &self.state
     }
 
+    /// Borrow the git handle the runner is using. CLI code that needs to call
+    /// post-run git operations (e.g., `gh pr create` after a successful run)
+    /// reaches in through here so the same shell-vs-mock implementation the
+    /// runner used during the run is reused.
+    pub fn git_handle(&self) -> &G {
+        &self.git
+    }
+
     /// Subscribe to the runner's event stream. Returns a fresh receiver each
     /// call; existing subscribers are unaffected.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {

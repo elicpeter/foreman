@@ -17,9 +17,15 @@ use tokio::process::Command;
 
 use super::{CommitId, DiffStat, Git, GitError};
 
+/// `gh` binary name resolved against `PATH`. Overridable per `ShellGit`
+/// instance via [`ShellGit::with_gh_binary`] so tests can point at a fixture
+/// script without touching `PATH`.
+const DEFAULT_GH_BINARY: &str = "gh";
+
 /// `Git` impl that invokes the local `git` CLI against a fixed workspace.
 pub struct ShellGit {
     workspace: PathBuf,
+    gh_binary: PathBuf,
 }
 
 impl ShellGit {
@@ -28,7 +34,16 @@ impl ShellGit {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
             workspace: workspace.into(),
+            gh_binary: PathBuf::from(DEFAULT_GH_BINARY),
         }
+    }
+
+    /// Override the `gh` binary path. Tests use this to substitute a fixture
+    /// script; production callers should leave it at the default so `gh` is
+    /// resolved against `PATH` like any other tool.
+    pub fn with_gh_binary(mut self, binary: impl Into<PathBuf>) -> Self {
+        self.gh_binary = binary.into();
+        self
     }
 
     /// Workspace this `ShellGit` was constructed against.
@@ -192,6 +207,58 @@ impl Git for ShellGit {
     async fn staged_diff(&self) -> Result<String> {
         let out = self.run_succeed("staged_diff", &["diff", "--cached"]).await?;
         Ok(out.stdout)
+    }
+
+    async fn open_pr(&self, title: &str, body: &str) -> Result<String> {
+        // `gh` resolves the target repository from its working directory's git
+        // remotes — there is no `-C` flag, so the workspace is passed via
+        // `current_dir` instead of an argv entry.
+        let mut cmd = Command::new(&self.gh_binary);
+        cmd.current_dir(&self.workspace)
+            .arg("pr")
+            .arg("create")
+            .arg("--title")
+            .arg(title)
+            .arg("--body")
+            .arg(body)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        let output = cmd
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "gh pr create: spawning child (binary {:?})",
+                    self.gh_binary
+                )
+            })?;
+        let out: CommandOut = output.into();
+        if !out.success {
+            return Err(GitError::Command {
+                operation: "open_pr".into(),
+                exit: out.status,
+                stderr: out.stderr,
+            }
+            .into());
+        }
+        // `gh pr create` prints the PR URL on the final stdout line. Take the
+        // last non-empty line so any preamble (`Creating pull request...`)
+        // doesn't leak into the returned URL.
+        let url = out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())
+            .unwrap_or("")
+            .to_string();
+        if url.is_empty() {
+            return Err(GitError::UnexpectedOutput {
+                operation: "open_pr".into(),
+                output: "(gh pr create produced no URL on stdout)".into(),
+            }
+            .into());
+        }
+        Ok(url)
     }
 }
 
@@ -535,5 +602,61 @@ mod tests {
         // anyhow chain should surface our typed error message.
         let chain = format!("{err:#}");
         assert!(chain.contains("checkout"), "chain: {chain}");
+    }
+
+    /// Resolve the path of a fixture script under `tests/fixtures/`.
+    fn fixture_path(name: &str) -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests");
+        p.push("fixtures");
+        p.push(name);
+        p
+    }
+
+    #[tokio::test]
+    async fn open_pr_returns_url_and_passes_title_and_body_to_gh() {
+        let dir = fresh_repo().await;
+        let git = ShellGit::new(dir.path()).with_gh_binary(fixture_path("fake-gh-success.sh"));
+
+        let url = git
+            .open_pr("foreman: phase 01 — Foundation", "## Run\n\nbody body body\n")
+            .await
+            .unwrap();
+        assert_eq!(url, "https://github.com/example/repo/pull/42");
+
+        // The fake logs its invocation into `.gh-fake-log` inside cwd, which
+        // confirms both the argv it saw and that we ran it from the workspace.
+        let log_path = dir.path().join(".gh-fake-log");
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(log.contains("pr"), "fake log: {log}");
+        assert!(log.contains("create"), "fake log: {log}");
+        assert!(log.contains("--title"), "fake log: {log}");
+        assert!(
+            log.contains("foreman: phase 01 — Foundation"),
+            "fake log: {log}"
+        );
+        assert!(log.contains("--body"), "fake log: {log}");
+        assert!(log.contains("body body body"), "fake log: {log}");
+        let workspace_real = std::fs::canonicalize(dir.path()).unwrap();
+        let logged_cwd_line = log
+            .lines()
+            .find(|l| l.starts_with("cwd:"))
+            .expect("cwd line in fake log");
+        let logged_cwd = logged_cwd_line.trim_start_matches("cwd:").trim();
+        let logged_cwd = std::fs::canonicalize(logged_cwd).unwrap();
+        assert_eq!(logged_cwd, workspace_real);
+    }
+
+    #[tokio::test]
+    async fn open_pr_surfaces_failure_with_stderr() {
+        let dir = fresh_repo().await;
+        let git = ShellGit::new(dir.path()).with_gh_binary(fixture_path("fake-gh-failure.sh"));
+        let err = git.open_pr("title", "body").await.unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(chain.contains("open_pr"), "chain: {chain}");
+        assert!(
+            chain.contains("could not determine the base repository"),
+            "chain: {chain}"
+        );
     }
 }

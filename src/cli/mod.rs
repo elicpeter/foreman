@@ -43,6 +43,11 @@ pub enum Command {
         /// Render a live `ratatui` dashboard instead of the plain logger.
         #[arg(long)]
         tui: bool,
+        /// After the run finishes successfully, open a pull request via
+        /// `gh pr create`. Equivalent to setting `git.create_pr = true` in
+        /// `foreman.toml`; either source enables the post-run PR step.
+        #[arg(long)]
+        pr: bool,
     },
     /// Print a summary of the current run.
     Status,
@@ -51,6 +56,10 @@ pub enum Command {
         /// Render a live `ratatui` dashboard instead of the plain logger.
         #[arg(long)]
         tui: bool,
+        /// After the resumed run finishes successfully, open a pull request
+        /// via `gh pr create`. Mirrors `foreman run --pr`.
+        #[arg(long)]
+        pr: bool,
     },
     /// Mark the active run as aborted. `foreman run` and `foreman resume`
     /// refuse to operate on an aborted state.
@@ -67,9 +76,9 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init => init::run(std::env::current_dir()?),
         Command::Plan { goal, force } => plan::run(std::env::current_dir()?, goal, force).await,
-        Command::Run { tui } => run::run(std::env::current_dir()?, tui).await,
+        Command::Run { tui, pr } => run::run(std::env::current_dir()?, tui, pr).await,
         Command::Status => status::run(std::env::current_dir()?),
-        Command::Resume { tui } => resume::run(std::env::current_dir()?, tui).await,
+        Command::Resume { tui, pr } => resume::run(std::env::current_dir()?, tui, pr).await,
         Command::Abort { checkout_original } => {
             abort::run(std::env::current_dir()?, checkout_original).await
         }

@@ -15,6 +15,7 @@
 //! never reshaping the existing ones.
 
 pub mod mock;
+pub mod pr;
 pub mod shell;
 
 use std::path::Path;
@@ -27,6 +28,7 @@ use thiserror::Error;
 use crate::plan::PhaseId;
 
 pub use mock::{MockGit, MockOp};
+pub use pr::{pr_body, pr_title, PrSummary};
 pub use shell::ShellGit;
 
 /// A git commit hash (full SHA-1 hex from `git rev-parse HEAD`).
@@ -136,6 +138,16 @@ pub trait Git: Send + Sync {
     /// keeps planning artifacts out of the diff. An empty index produces an
     /// empty string.
     async fn staged_diff(&self) -> Result<String>;
+
+    /// Open a pull request via `gh pr create` for the current branch.
+    ///
+    /// Returns the URL `gh` prints on stdout (e.g.,
+    /// `https://github.com/owner/repo/pull/42`). The branch must already be
+    /// pushed to a remote with `gh` configured for the repo; foreman does not
+    /// push or create remotes itself. Implementations are expected to invoke
+    /// `gh pr create` with `--fill-first`-equivalent metadata via `--title`
+    /// and `--body` so the call is non-interactive.
+    async fn open_pr(&self, title: &str, body: &str) -> Result<String>;
 }
 
 /// Build a per-run branch name from a prefix and a UTC timestamp.

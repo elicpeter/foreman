@@ -16,6 +16,7 @@
 //! `.foreman/state.json` to start a new run.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -25,7 +26,7 @@ use tokio::task::JoinHandle;
 use crate::agent::claude_code::ClaudeCodeAgent;
 use crate::config;
 use crate::deferred::{self, DeferredDoc};
-use crate::git::{Git, ShellGit};
+use crate::git::{self, Git, PrSummary, ShellGit};
 use crate::plan::{self, Plan};
 use crate::runner::{self, RunSummary, Runner};
 use crate::state;
@@ -43,9 +44,11 @@ pub enum StartMode {
 /// Top-level entry point for the `run` subcommand.
 ///
 /// `tui` toggles between the plain stderr logger (default) and the
-/// `ratatui` dashboard.
-pub async fn run(workspace: PathBuf, tui: bool) -> Result<()> {
-    execute(workspace, tui, StartMode::Fresh).await
+/// `ratatui` dashboard. `pr` opts into the post-run pull-request creation
+/// step described in [`execute`]; either it or `git.create_pr = true` in
+/// `foreman.toml` enables the step.
+pub async fn run(workspace: PathBuf, tui: bool, pr: bool) -> Result<()> {
+    execute(workspace, tui, pr, StartMode::Fresh).await
 }
 
 /// Shared runner driver used by both `foreman run` and `foreman resume`.
@@ -54,7 +57,14 @@ pub async fn run(workspace: PathBuf, tui: bool) -> Result<()> {
 /// the plan, and the deferred doc; reconciles state with `mode`; ensures the
 /// per-run branch is checked out; spawns the configured event subscriber
 /// (logger or TUI); then drives [`Runner::run`] to completion or halt.
-pub async fn execute(workspace: PathBuf, tui: bool, mode: StartMode) -> Result<()> {
+///
+/// When the run finishes (no halt) and either `pr_flag` is set or
+/// `git.create_pr = true` in `foreman.toml`, the function shells out to
+/// `gh pr create` via [`Git::open_pr`] using a title and body generated from
+/// the completed phases plus any remaining deferred work. PR creation
+/// failures are reported but do not change the function's exit status — the
+/// underlying run already succeeded.
+pub async fn execute(workspace: PathBuf, tui: bool, pr_flag: bool, mode: StartMode) -> Result<()> {
     let config = config::load(&workspace)
         .with_context(|| format!("run: loading config in {:?}", workspace))?;
     let plan = load_plan(&workspace)?;
@@ -102,6 +112,8 @@ pub async fn execute(workspace: PathBuf, tui: bool, mode: StartMode) -> Result<(
     state::save(&workspace, Some(&state))
         .with_context(|| format!("run: persisting initial state in {:?}", workspace))?;
 
+    let want_pr = pr_flag || config.git.create_pr;
+
     let agent = ClaudeCodeAgent::new();
     let mut runner = Runner::new(workspace, config, plan, deferred, state, agent, git);
 
@@ -116,11 +128,47 @@ pub async fn execute(workspace: PathBuf, tui: bool, mode: StartMode) -> Result<(
 
     match summary {
         None => Ok(()),
-        Some(RunSummary::Finished) => Ok(()),
+        Some(RunSummary::Finished) => {
+            if want_pr {
+                match open_post_run_pr(&runner).await {
+                    Ok(url) => {
+                        let stdout = std::io::stdout();
+                        let mut h = stdout.lock();
+                        let _ = writeln!(h, "[foreman] opened PR: {url}");
+                    }
+                    Err(e) => eprintln!("[foreman] PR creation failed: {e:#}"),
+                }
+            }
+            Ok(())
+        }
         Some(RunSummary::Halted { phase_id, reason }) => {
             Err(anyhow!("run halted at phase {phase_id}: {reason}"))
         }
     }
+}
+
+/// Build a [`PrSummary`] from the just-finished runner and shell out to
+/// [`Git::open_pr`]. Returns the URL `gh pr create` printed on success.
+/// Lives here rather than in the runner because PR creation is a CLI-layer
+/// concern — the runner is plan-agnostic and never talks to GitHub.
+pub async fn open_post_run_pr<A, G>(runner: &Runner<A, G>) -> Result<String>
+where
+    A: crate::agent::Agent,
+    G: Git,
+{
+    let summary = PrSummary {
+        plan: runner.plan(),
+        state: runner.state(),
+        deferred: runner.deferred(),
+    };
+    let title = git::pr_title(&summary);
+    let body = git::pr_body(&summary);
+    let url = runner
+        .git_handle()
+        .open_pr(&title, &body)
+        .await
+        .context("opening PR via gh pr create")?;
+    Ok(url)
 }
 
 fn load_plan(workspace: &Path) -> Result<Plan> {

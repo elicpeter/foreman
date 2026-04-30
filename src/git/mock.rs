@@ -40,6 +40,13 @@ pub enum MockOp {
     DiffStat(String, String),
     /// `staged_diff` was called.
     StagedDiff,
+    /// `open_pr(title, body)` was called.
+    OpenPr {
+        /// PR title passed in.
+        title: String,
+        /// PR body passed in.
+        body: String,
+    },
 }
 
 /// Record of a single commit in [`MockGit`]'s in-memory log.
@@ -68,6 +75,10 @@ struct MockState {
     /// auditor a representative diff; the mock has no real index/working tree
     /// to compute one from.
     staged_diff: String,
+    /// Result the next `open_pr` call should produce. Defaults to a synthetic
+    /// success URL so tests that don't care about the value still get a
+    /// non-error return.
+    open_pr_response: Result<String, String>,
 }
 
 impl MockState {
@@ -83,6 +94,7 @@ impl MockState {
             ops: Vec::new(),
             next_commit_seq: 0,
             staged_diff: String::new(),
+            open_pr_response: Ok("https://github.com/example/repo/pull/1".to_string()),
         }
     }
 }
@@ -137,6 +149,16 @@ impl MockGit {
     /// representative diff string.
     pub fn set_staged_diff(&self, diff: impl Into<String>) {
         self.state.lock().unwrap().staged_diff = diff.into();
+    }
+
+    /// Make the next [`Git::open_pr`] call return `Ok(url)`.
+    pub fn set_open_pr_response(&self, url: impl Into<String>) {
+        self.state.lock().unwrap().open_pr_response = Ok(url.into());
+    }
+
+    /// Make the next [`Git::open_pr`] call fail with `message`.
+    pub fn set_open_pr_failure(&self, message: impl Into<String>) {
+        self.state.lock().unwrap().open_pr_response = Err(message.into());
     }
 
     /// Most recent exclusion set passed to `stage_changes`, or `None` if it
@@ -249,6 +271,18 @@ impl Git for MockGit {
         let mut s = self.state.lock().unwrap();
         s.ops.push(MockOp::StagedDiff);
         Ok(s.staged_diff.clone())
+    }
+
+    async fn open_pr(&self, title: &str, body: &str) -> Result<String> {
+        let mut s = self.state.lock().unwrap();
+        s.ops.push(MockOp::OpenPr {
+            title: title.to_string(),
+            body: body.to_string(),
+        });
+        match &s.open_pr_response {
+            Ok(url) => Ok(url.clone()),
+            Err(msg) => Err(anyhow!("mock-git: open_pr failed: {msg}")),
+        }
     }
 }
 
@@ -379,6 +413,42 @@ mod tests {
         let git = MockGit::new();
         let stat = git.diff_stat("x", "y").await.unwrap();
         assert_eq!(stat, DiffStat::default());
+    }
+
+    #[tokio::test]
+    async fn open_pr_records_op_and_returns_canned_url() {
+        let git = MockGit::new();
+        // Default response is a synthetic URL.
+        let url = git.open_pr("title", "body").await.unwrap();
+        assert_eq!(url, "https://github.com/example/repo/pull/1");
+
+        // Override the canned response.
+        git.set_open_pr_response("https://github.com/example/repo/pull/77");
+        let url = git.open_pr("t2", "b2").await.unwrap();
+        assert_eq!(url, "https://github.com/example/repo/pull/77");
+
+        let ops = git.ops();
+        assert_eq!(
+            ops,
+            vec![
+                MockOp::OpenPr {
+                    title: "title".into(),
+                    body: "body".into()
+                },
+                MockOp::OpenPr {
+                    title: "t2".into(),
+                    body: "b2".into()
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn open_pr_failure_response_surfaces_error() {
+        let git = MockGit::new();
+        git.set_open_pr_failure("no remote");
+        let err = git.open_pr("t", "b").await.unwrap_err();
+        assert!(format!("{err}").contains("no remote"));
     }
 
     #[tokio::test]
