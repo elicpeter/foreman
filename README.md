@@ -52,13 +52,46 @@ Each phase becomes its own commit on a per-run branch, optionally rolled into a 
 
 ## Install
 
-A recent stable Rust toolchain is the only build requirement.
+### From crates.io
 
 ```sh
-git clone <this repo>
+cargo install pitboss
+```
+
+This pulls the latest published release and drops the `pitboss` binary in `~/.cargo/bin`. Requires a stable Rust toolchain (1.88 or newer).
+
+### Prebuilt binaries
+
+Each tagged release ships static builds on the [Releases page](https://github.com/elicpeter/pitboss/releases) for:
+
+- `x86_64-unknown-linux-gnu`
+- `x86_64-apple-darwin` (Intel macOS)
+- `aarch64-apple-darwin` (Apple Silicon macOS)
+
+Pick the archive that matches your platform, verify the checksum, and drop the binary on your `PATH`:
+
+```sh
+TAG=v0.1.0                                # whichever release you want
+TARGET=aarch64-apple-darwin               # or x86_64-apple-darwin / x86_64-unknown-linux-gnu
+ARCHIVE="pitboss-${TAG}-${TARGET}.tar.gz"
+
+curl -fsSLO "https://github.com/elicpeter/pitboss/releases/download/${TAG}/${ARCHIVE}"
+curl -fsSLO "https://github.com/elicpeter/pitboss/releases/download/${TAG}/${ARCHIVE}.sha256"
+shasum -a 256 -c "${ARCHIVE}.sha256"
+
+tar -xzf "${ARCHIVE}"
+install "pitboss-${TAG}-${TARGET}/pitboss" /usr/local/bin/pitboss
+```
+
+### From source
+
+```sh
+git clone https://github.com/elicpeter/pitboss
 cd pitboss
 cargo install --path .
 ```
+
+### Runtime dependencies
 
 To actually drive the agent you also need:
 
