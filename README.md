@@ -405,6 +405,28 @@ The [`examples/`](examples) directory contains a walkthrough plan you can copy i
 
 ## Contributing
 
+PRs and issues welcome. A few ground rules to keep CI green and the diff reviewable.
+
+### Local checks
+
+CI runs `fmt`, `clippy`, `test`, `doc`, and an MSRV build. Run the same locally before pushing:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets
+cargo test --workspace --doc
+cargo doc --workspace --no-deps --all-features
+```
+
+MSRV is **Rust 1.88**. New code must build under that toolchain. CI also runs `cargo deny check` and CodeQL on every push.
+
+### Adding a new agent backend
+
+Implement the `Agent` trait in a new module under `src/agent/`, register it in the backend dispatch, and add an integration test under `tests/backends.rs` that exercises a happy-path phase. Document the binary, config block, and known limitations in the [Agent backends](#agent-backends) section above. The Claude Code backend is the reference implementation worth reading first.
+
+### Source layout
+
 ```
 src/
 ├── main.rs          CLI entry, wires the tracing subscriber
@@ -423,6 +445,14 @@ src/
 └── tui/             ratatui dashboard
 tests/               integration tests
 ```
+
+### Filing issues
+
+Include `pitboss --version`, the relevant snippet from `pitboss.toml`, and the failing log under `.pitboss/logs/`. For runner halts, the phase id and the halt reason from `pitboss status` are usually enough to start.
+
+### Commits and PRs
+
+Keep commits focused. Reference an issue in the PR body when one exists. The CI matrix runs on Ubuntu and macOS, so platform-specific code needs to work on both.
 
 ## License
 
