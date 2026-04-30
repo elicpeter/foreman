@@ -30,8 +30,7 @@
 //!
 //! - `agent_message` (`message`: string) → [`AgentEvent::Stdout`].
 //! - `exec_command_begin` (`command`: array of strings) → [`AgentEvent::ToolUse`]
-//!   carrying the first argv element (or the full string if it's a single
-//!   `sh -c "…"` form).
+//!   carrying the first argv element.
 //! - `mcp_tool_call_begin` (`server`, `tool`) → [`AgentEvent::ToolUse`] carrying
 //!   `<server>.<tool>` so MCP-driven runs surface alongside shell tool calls.
 //! - `patch_apply_begin` → [`AgentEvent::ToolUse`]`("patch")` so file edits show

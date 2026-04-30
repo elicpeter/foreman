@@ -84,18 +84,19 @@ pub async fn execute(
     dry_run: bool,
     mode: StartMode,
 ) -> Result<()> {
+    let config = config::load(&workspace)
+        .with_context(|| format!("run: loading config in {:?}", workspace))?;
     if dry_run {
-        execute_with_agent(workspace, tui, false, mode, dry_run_agent()).await
+        execute_with_agent(workspace, config, tui, false, mode, dry_run_agent()).await
     } else {
-        let cfg = config::load(&workspace)
-            .with_context(|| format!("run: loading config in {:?}", workspace))?;
-        let agent = agent::build_agent(&cfg)?;
-        execute_with_agent(workspace, tui, pr_flag, mode, agent).await
+        let agent = agent::build_agent(&config)?;
+        execute_with_agent(workspace, config, tui, pr_flag, mode, agent).await
     }
 }
 
 async fn execute_with_agent<A: Agent + 'static>(
     workspace: PathBuf,
+    config: config::Config,
     tui: bool,
     pr_flag: bool,
     mode: StartMode,
@@ -103,8 +104,6 @@ async fn execute_with_agent<A: Agent + 'static>(
 ) -> Result<()> {
     let dry_run = is_dry_run_agent(&agent);
 
-    let config = config::load(&workspace)
-        .with_context(|| format!("run: loading config in {:?}", workspace))?;
     let plan = load_plan(&workspace)?;
     let deferred = load_deferred(&workspace)?;
 

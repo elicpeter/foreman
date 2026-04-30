@@ -207,7 +207,20 @@ pub fn build_agent(cfg: &crate::config::Config) -> Result<Box<dyn Agent + Send +
         Some(s) => s.parse::<backend::BackendKind>()?,
     };
     match kind {
-        backend::BackendKind::ClaudeCode => Ok(Box::new(claude_code::ClaudeCodeAgent::new())),
+        backend::BackendKind::ClaudeCode => {
+            let overrides = &cfg.agent.claude_code;
+            let mut agent = match overrides.binary.as_ref() {
+                Some(path) => claude_code::ClaudeCodeAgent::with_binary(path),
+                None => claude_code::ClaudeCodeAgent::new(),
+            };
+            if !overrides.extra_args.is_empty() {
+                agent = agent.with_extra_args(overrides.extra_args.clone());
+            }
+            if let Some(model) = overrides.model.as_deref() {
+                agent = agent.with_model_override(model);
+            }
+            Ok(Box::new(agent))
+        }
         backend::BackendKind::Codex => {
             let overrides = &cfg.agent.codex;
             let mut agent = match overrides.binary.as_ref() {
@@ -386,6 +399,23 @@ mod tests {
         match build_agent(&cfg) {
             Ok(agent) => assert_eq!(agent.name(), "aider"),
             Err(e) => panic!("aider with overrides must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_claude_code_honors_overrides() {
+        // The `[agent.claude_code]` table must reach the constructed agent
+        // so a workspace-pinned binary, model, or extra args actually changes
+        // dispatch behavior. Without this wiring the TUI header would show an
+        // override model the backend never uses.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("claude_code".to_string());
+        cfg.agent.claude_code.binary = Some(std::path::PathBuf::from("/tmp/fake-claude"));
+        cfg.agent.claude_code.extra_args = vec!["--max-turns".into(), "50".into()];
+        cfg.agent.claude_code.model = Some("claude-opus-4-7".into());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "claude-code"),
+            Err(e) => panic!("claude_code with overrides must build: {e:#}"),
         }
     }
 

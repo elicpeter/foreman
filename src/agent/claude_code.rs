@@ -63,6 +63,8 @@ const ERROR_TAIL_LINES: usize = 8;
 pub struct ClaudeCodeAgent {
     binary: PathBuf,
     permission_mode: String,
+    extra_args: Vec<String>,
+    model_override: Option<String>,
 }
 
 impl ClaudeCodeAgent {
@@ -71,6 +73,8 @@ impl ClaudeCodeAgent {
         Self {
             binary: PathBuf::from(DEFAULT_BINARY),
             permission_mode: "auto".to_string(),
+            extra_args: Vec::new(),
+            model_override: None,
         }
     }
 
@@ -81,6 +85,8 @@ impl ClaudeCodeAgent {
         Self {
             binary: binary.into(),
             permission_mode: "auto".to_string(),
+            extra_args: Vec::new(),
+            model_override: None,
         }
     }
 
@@ -89,6 +95,23 @@ impl ClaudeCodeAgent {
     /// `default`, `dontAsk`, `plan`.
     pub fn with_permission_mode(mut self, mode: impl Into<String>) -> Self {
         self.permission_mode = mode.into();
+        self
+    }
+
+    /// Append extra argv that gets spliced in just before the positional `--`
+    /// prompt sigil on every invocation. Mirrors `[agent.claude_code]
+    /// extra_args` in `pitboss.toml`.
+    pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
+        self.extra_args = args;
+        self
+    }
+
+    /// Override the model identifier with a value from `[agent.claude_code]
+    /// model`. When set this beats the per-role model in
+    /// [`AgentRequest::model`] — users who configure a backend-specific model
+    /// expect it to be used for every dispatch through that backend.
+    pub fn with_model_override(mut self, model: impl Into<String>) -> Self {
+        self.model_override = Some(model.into());
         self
     }
 
@@ -208,10 +231,14 @@ impl ClaudeCodeAgent {
         let mut cmd = Command::new(&self.binary);
         cmd.current_dir(&req.workdir);
         cmd.args(["--print", "--output-format", "stream-json", "--verbose"]);
-        cmd.args(["--model", &req.model]);
+        let model = self.model_override.as_deref().unwrap_or(&req.model);
+        cmd.args(["--model", model]);
         cmd.args(["--permission-mode", &self.permission_mode]);
         if !req.system_prompt.is_empty() {
             cmd.arg("--append-system-prompt").arg(&req.system_prompt);
+        }
+        for arg in &self.extra_args {
+            cmd.arg(arg);
         }
         // Positional prompt argument comes last so flag parsing doesn't get
         // confused if the prompt happens to start with `--`.
@@ -578,6 +605,54 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "--" && w[1] == "user body"));
         assert_eq!(std_cmd.get_program(), "/usr/local/bin/claude");
         assert_eq!(std_cmd.get_current_dir(), Some(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn build_command_applies_model_override_and_extra_args() {
+        // A `[agent.claude_code] model = "..."` override beats the per-role
+        // model in `req.model`, and `extra_args` get spliced in before the
+        // positional `--` prompt sigil. Both have to actually reach the spawned
+        // command, otherwise pitboss silently drops user config.
+        let agent = ClaudeCodeAgent::with_binary("claude")
+            .with_extra_args(vec!["--max-turns".into(), "50".into()])
+            .with_model_override("claude-opus-4-7");
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        let req = AgentRequest {
+            role: Role::Implementer,
+            model: "role-default-model".into(),
+            system_prompt: "sys".into(),
+            user_prompt: "u".into(),
+            workdir: dir.path().to_path_buf(),
+            log_path: log,
+            timeout: Duration::from_secs(1),
+        };
+        let cmd = agent.build_command(&req);
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "claude-opus-4-7"),
+            "model override should win over req.model: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "role-default-model"),
+            "req.model must not leak when override is set: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--max-turns" && w[1] == "50"),
+            "extra_args missing: {args:?}"
+        );
+        let max_turns_idx = args.iter().position(|a| a == "--max-turns").unwrap();
+        let dashdash_idx = args.iter().position(|a| a == "--").unwrap();
+        assert!(
+            max_turns_idx < dashdash_idx,
+            "extra_args must appear before the positional `--` sigil: {args:?}"
+        );
     }
 
     #[tokio::test]

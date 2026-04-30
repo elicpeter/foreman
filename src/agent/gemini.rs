@@ -32,7 +32,8 @@
 //! - Success — `{"response": "...", "stats": {...}}`. The `response` field
 //!   becomes one [`AgentEvent::Stdout`]; each entry under `stats.tools.byName`
 //!   becomes one [`AgentEvent::ToolUse`] carrying the tool name; the summed
-//!   `stats.models.*.tokens.{prompt,candidates}` produces a single terminal
+//!   `stats.models.*.tokens.{prompt,cached}` (input) and
+//!   `stats.models.*.tokens.{candidates,thoughts}` (output) produce a single terminal
 //!   [`AgentEvent::TokenDelta`] so the runner's accumulator doesn't double-
 //!   count.
 //! - Failure — `{"error": {"message": "...", ...}}`. The embedded message is

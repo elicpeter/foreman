@@ -106,7 +106,15 @@ pub async fn conduct<A: Agent>(
     }
 
     if pairs.is_empty() {
-        bail!("interview: no answers provided — aborting");
+        eprintln!(
+            "{fm} {}",
+            col(
+                c,
+                style::DIM,
+                "no answers provided, proceeding with original goal"
+            )
+        );
+        return Ok(String::new());
     }
 
     let answered = pairs.len();
