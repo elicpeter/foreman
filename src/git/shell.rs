@@ -205,7 +205,9 @@ impl Git for ShellGit {
     }
 
     async fn staged_diff(&self) -> Result<String> {
-        let out = self.run_succeed("staged_diff", &["diff", "--cached"]).await?;
+        let out = self
+            .run_succeed("staged_diff", &["diff", "--cached"])
+            .await?;
         Ok(out.stdout)
     }
 
@@ -222,16 +224,9 @@ impl Git for ShellGit {
             .arg("--body")
             .arg(body)
             .env("GIT_TERMINAL_PROMPT", "0");
-        let output = cmd
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .with_context(|| {
-                format!(
-                    "gh pr create: spawning child (binary {:?})",
-                    self.gh_binary
-                )
-            })?;
+        let output = cmd.stdin(Stdio::null()).output().await.with_context(|| {
+            format!("gh pr create: spawning child (binary {:?})", self.gh_binary)
+        })?;
         let out: CommandOut = output.into();
         if !out.success {
             return Err(GitError::Command {
@@ -619,7 +614,10 @@ mod tests {
         let git = ShellGit::new(dir.path()).with_gh_binary(fixture_path("fake-gh-success.sh"));
 
         let url = git
-            .open_pr("foreman: phase 01 — Foundation", "## Run\n\nbody body body\n")
+            .open_pr(
+                "foreman: phase 01 — Foundation",
+                "## Run\n\nbody body body\n",
+            )
             .await
             .unwrap();
         assert_eq!(url, "https://github.com/example/repo/pull/42");

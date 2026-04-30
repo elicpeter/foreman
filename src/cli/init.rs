@@ -265,21 +265,35 @@ fn append_entry(existing: Option<&str>) -> String {
 }
 
 fn warn_skipped(rel: &str) {
+    use crate::style::{self, col};
+    let c = style::use_color_stderr();
     let stderr = std::io::stderr();
     let mut handle = stderr.lock();
     // Best-effort: warning output is informational and we don't want a write
     // error to fail the whole init.
-    let _ = writeln!(handle, "warning: {} already exists, leaving it alone", rel);
+    let _ = writeln!(
+        handle,
+        "{} {} already exists, leaving it alone",
+        col(c, style::BOLD_YELLOW, "warning:"),
+        rel
+    );
 }
 
 fn print_summary(report: &[ReportEntry]) {
+    use crate::style::{self, col};
+    let c = style::use_color_stdout();
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     for entry in report {
         let line = match entry.action {
-            Action::Created => format!("created {}", entry.path),
-            Action::Skipped => format!("skipped {} (already exists)", entry.path),
-            Action::Updated => format!("updated {}", entry.path),
+            Action::Created => format!("{} {}", col(c, style::GREEN, "created"), entry.path),
+            Action::Skipped => format!(
+                "{} {} {}",
+                col(c, style::DARK_GRAY, "skipped"),
+                entry.path,
+                col(c, style::DIM, "(already exists)")
+            ),
+            Action::Updated => format!("{} {}", col(c, style::YELLOW, "updated"), entry.path),
         };
         let _ = writeln!(handle, "{}", line);
     }

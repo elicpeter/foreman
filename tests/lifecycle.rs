@@ -23,11 +23,7 @@ fn foreman() -> Command {
 }
 
 fn init_workspace(dir: &Path) {
-    foreman()
-        .arg("init")
-        .current_dir(dir)
-        .assert()
-        .success();
+    foreman().arg("init").current_dir(dir).assert().success();
 }
 
 fn init_git_repo(dir: &Path) {

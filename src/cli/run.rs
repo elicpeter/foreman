@@ -166,13 +166,26 @@ async fn execute_with_agent<A: Agent + 'static>(
         None => Ok(()),
         Some(RunSummary::Finished) => {
             if want_pr {
+                use crate::style::{self, col};
                 match open_post_run_pr(&runner).await {
                     Ok(url) => {
+                        let c = style::use_color_stdout();
                         let stdout = std::io::stdout();
                         let mut h = stdout.lock();
-                        let _ = writeln!(h, "[foreman] opened PR: {url}");
+                        let _ = writeln!(
+                            h,
+                            "{} opened PR: {}",
+                            col(c, style::BOLD_CYAN, "[foreman]"),
+                            col(c, style::CYAN, &url)
+                        );
                     }
-                    Err(e) => eprintln!("[foreman] PR creation failed: {e:#}"),
+                    Err(e) => {
+                        let c = style::use_color_stderr();
+                        eprintln!(
+                            "{} PR creation failed: {e:#}",
+                            col(c, style::BOLD_RED, "[foreman]")
+                        );
+                    }
                 }
             }
             Ok(())

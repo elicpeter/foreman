@@ -184,8 +184,7 @@ async fn open_post_run_pr_with_shell_git_invokes_fake_gh_with_generated_title_an
 
     // The runner's git handle is the one we'll poke with `open_pr` after the
     // run, so it gets the fake gh binary.
-    let runner_git =
-        ShellGit::new(dir.path()).with_gh_binary(fixture_path("fake-gh-success.sh"));
+    let runner_git = ShellGit::new(dir.path()).with_gh_binary(fixture_path("fake-gh-success.sh"));
     let mut runner = Runner::new(
         dir.path().to_path_buf(),
         config,
@@ -197,7 +196,10 @@ async fn open_post_run_pr_with_shell_git_invokes_fake_gh_with_generated_title_an
     );
 
     let summary = runner.run().await.unwrap();
-    assert!(matches!(summary, RunSummary::Finished), "summary: {summary:?}");
+    assert!(
+        matches!(summary, RunSummary::Finished),
+        "summary: {summary:?}"
+    );
     // Sanity: the runner committed the phase, so completed has one entry.
     assert_eq!(runner.state().completed.len(), 1);
 
@@ -208,7 +210,10 @@ async fn open_post_run_pr_with_shell_git_invokes_fake_gh_with_generated_title_an
     // the workspace because `ShellGit::open_pr` sets `current_dir` itself.
     let log = fs::read_to_string(dir.path().join(".gh-fake-log")).unwrap();
     assert!(log.contains("--title"), "fake log: {log}");
-    assert!(log.contains("foreman: phase 01 — Foundation"), "fake log: {log}");
+    assert!(
+        log.contains("foreman: phase 01 — Foundation"),
+        "fake log: {log}"
+    );
     assert!(log.contains("--body"), "fake log: {log}");
     assert!(log.contains("## Run"), "fake log: {log}");
     assert!(log.contains("## Completed phases"), "fake log: {log}");

@@ -387,11 +387,7 @@ output_per_million_usd = 2.0
         let unknown = find_unknown_keys(&value);
         // `pricing` itself is recognized; arbitrary model ids inside it are
         // not validated and therefore not flagged.
-        assert!(
-            unknown.is_empty(),
-            "unexpected unknown keys: {:?}",
-            unknown
-        );
+        assert!(unknown.is_empty(), "unexpected unknown keys: {:?}", unknown);
     }
 
     #[test]

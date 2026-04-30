@@ -20,8 +20,8 @@ fn examples_dir() -> PathBuf {
 fn todo_cli_plan_parses_and_round_trips() {
     let path = examples_dir().join("todo-cli").join("plan.md");
     let text = fs::read_to_string(&path).expect("read plan.md");
-    let plan = foreman::plan::parse(&text)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let plan =
+        foreman::plan::parse(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
     assert!(
         !plan.phases.is_empty(),
         "example plan should declare at least one phase"
@@ -41,8 +41,8 @@ fn todo_cli_plan_parses_and_round_trips() {
 fn todo_cli_foreman_toml_parses() {
     let path = examples_dir().join("todo-cli").join("foreman.toml");
     let text = fs::read_to_string(&path).expect("read foreman.toml");
-    let cfg = foreman::config::parse(&text)
-        .unwrap_or_else(|e| panic!("parse {}: {e:#}", path.display()));
+    let cfg =
+        foreman::config::parse(&text).unwrap_or_else(|e| panic!("parse {}: {e:#}", path.display()));
     // Spot-check a couple of fields the example deliberately overrides.
     assert!(cfg.audit.enabled);
     assert_eq!(cfg.retries.fixer_max_attempts, 3);

@@ -48,6 +48,13 @@ pub fn render_report(
     state: Option<&RunState>,
     config: &Config,
 ) -> String {
+    use crate::style::{self, col};
+    let c = style::use_color_stdout();
+
+    // Label in cyan, muted parenthetical text.
+    let lbl = |key: &str| col(c, style::CYAN, key);
+    let dim = |v: &str| col(c, style::DIM, v);
+
     let mut out = String::new();
 
     let total_phases = plan.phases.len();
@@ -63,67 +70,89 @@ pub fn render_report(
 
     match state {
         None => {
-            out.push_str("run: not started (no .foreman/state.json)\n");
+            out.push_str(&format!(
+                "{}: {}\n",
+                lbl("run"),
+                col(c, style::YELLOW, "not started (no .foreman/state.json)")
+            ));
         }
         Some(s) if s.aborted => {
             out.push_str(&format!(
-                "run: {} (aborted, started {})\n",
-                s.run_id,
-                s.started_at.to_rfc3339()
+                "{}: {} {}\n",
+                lbl("run"),
+                col(c, style::BOLD_RED, &s.run_id),
+                dim(&format!("(aborted, started {})", s.started_at.to_rfc3339()))
             ));
-            out.push_str(&format!("branch: {}\n", s.branch));
+            out.push_str(&format!("{}: {}\n", lbl("branch"), s.branch));
             if let Some(orig) = &s.original_branch {
-                out.push_str(&format!("original branch: {}\n", orig));
+                out.push_str(&format!("{}: {}\n", lbl("original branch"), orig));
             }
         }
         Some(s) => {
             out.push_str(&format!(
-                "run: {} (started {})\n",
-                s.run_id,
-                s.started_at.to_rfc3339()
+                "{}: {} {}\n",
+                lbl("run"),
+                col(c, style::BOLD_WHITE, &s.run_id),
+                dim(&format!("(started {})", s.started_at.to_rfc3339()))
             ));
-            out.push_str(&format!("branch: {}\n", s.branch));
+            out.push_str(&format!("{}: {}\n", lbl("branch"), s.branch));
             if let Some(orig) = &s.original_branch {
-                out.push_str(&format!("original branch: {}\n", orig));
+                out.push_str(&format!("{}: {}\n", lbl("original branch"), orig));
             }
         }
     }
 
     out.push_str(&match current_phase_index {
         Some(i) => format!(
-            "plan: phase {} of {} — {} ({})\n",
-            plan.current_phase, total_phases, current_phase_title, i
+            "{}: phase {} of {} — {} {}\n",
+            lbl("plan"),
+            col(c, style::BOLD_WHITE, &plan.current_phase.to_string()),
+            total_phases,
+            current_phase_title,
+            dim(&format!("({i})")),
         ),
         None => format!(
-            "plan: current phase {} not found in plan ({} phases total)\n",
-            plan.current_phase, total_phases
+            "{}: current phase {} not found in plan ({} phases total)\n",
+            lbl("plan"),
+            plan.current_phase,
+            total_phases
         ),
     });
 
     if let Some(s) = state {
         if s.completed.is_empty() {
-            out.push_str("completed: (none)\n");
+            out.push_str(&format!("{}: {}\n", lbl("completed"), dim("(none)")));
         } else {
             let joined: Vec<&str> = s.completed.iter().map(|p| p.as_str()).collect();
-            out.push_str(&format!("completed: {}\n", joined.join(", ")));
+            out.push_str(&format!(
+                "{}: {}\n",
+                lbl("completed"),
+                col(c, style::GREEN, &joined.join(", "))
+            ));
         }
     }
 
     let unchecked = deferred.items.iter().filter(|i| !i.done).count();
     let checked = deferred.items.len() - unchecked;
     out.push_str(&format!(
-        "deferred items: {} ({} unchecked, {} checked)\n",
+        "{}: {} {}\n",
+        lbl("deferred items"),
         deferred.items.len(),
-        unchecked,
-        checked
+        dim(&format!("({unchecked} unchecked, {checked} checked)"))
     ));
-    out.push_str(&format!("deferred phases: {}\n", deferred.phases.len()));
+    out.push_str(&format!(
+        "{}: {}\n",
+        lbl("deferred phases"),
+        deferred.phases.len()
+    ));
 
     if let Some(s) = state {
         let usage = &s.token_usage;
         out.push_str(&format!(
-            "tokens: input={} output={}\n",
-            usage.input, usage.output
+            "{}: input={} output={}\n",
+            lbl("tokens"),
+            usage.input,
+            usage.output
         ));
         if !usage.by_role.is_empty() {
             let mut roles: Vec<(&String, &state::RoleUsage)> = usage.by_role.iter().collect();
@@ -131,17 +160,19 @@ pub fn render_report(
             for (role, ru) in roles {
                 out.push_str(&format!(
                     "  {}: input={} output={}\n",
-                    role, ru.input, ru.output
+                    dim(role),
+                    ru.input,
+                    ru.output
                 ));
             }
         }
-        out.push_str(&render_budgets(config, usage));
+        out.push_str(&render_budgets(config, usage, c));
     }
 
     if let Some(s) = state {
         match last_commit_subject(workspace, &s.branch) {
-            Some(line) => out.push_str(&format!("last commit: {}\n", line)),
-            None => out.push_str("last commit: (none)\n"),
+            Some(line) => out.push_str(&format!("{}: {}\n", lbl("last commit"), line)),
+            None => out.push_str(&format!("{}: {}\n", lbl("last commit"), dim("(none)"))),
         }
     }
 
@@ -154,21 +185,36 @@ pub fn render_report(
 /// [`crate::runner::budget_totals`]) so users can see spend at a glance even
 /// without budgets configured. When either budget cap is set, an extra line
 /// per cap reports usage against that cap.
-fn render_budgets(config: &Config, usage: &crate::state::TokenUsage) -> String {
+fn render_budgets(config: &Config, usage: &crate::state::TokenUsage, c: bool) -> String {
+    use crate::style::{self, col};
+    let lbl = |key: &str| col(c, style::CYAN, key);
+    let dim = |v: &str| col(c, style::DIM, v);
+
     let (total_tokens, total_usd) = runner::budget_totals(config, usage);
-    let mut out = format!("cost: ${:.4} ({} tokens)\n", total_usd, total_tokens);
+    let mut out = format!(
+        "{}: {} {}\n",
+        lbl("cost"),
+        col(c, style::BOLD_YELLOW, &format!("${:.4}", total_usd)),
+        dim(&format!("({total_tokens} tokens)"))
+    );
     if let Some(cap) = config.budgets.max_total_tokens {
         let remaining = cap.saturating_sub(total_tokens);
         out.push_str(&format!(
-            "  token budget: {}/{} used, {} remaining\n",
-            total_tokens, cap, remaining
+            "  {}: {}/{} used, {} remaining\n",
+            dim("token budget"),
+            total_tokens,
+            cap,
+            remaining
         ));
     }
     if let Some(cap) = config.budgets.max_total_usd {
         let remaining = (cap - total_usd).max(0.0);
         out.push_str(&format!(
-            "  USD budget: ${:.4}/${:.4} used, ${:.4} remaining\n",
-            total_usd, cap, remaining
+            "  {}: ${:.4}/${:.4} used, ${:.4} remaining\n",
+            dim("USD budget"),
+            total_usd,
+            cap,
+            remaining
         ));
     }
     out
@@ -176,8 +222,7 @@ fn render_budgets(config: &Config, usage: &crate::state::TokenUsage) -> String {
 
 fn load_plan(workspace: &Path) -> Result<Plan> {
     let path = workspace.join("plan.md");
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("status: reading {:?}", path))?;
+    let text = fs::read_to_string(&path).with_context(|| format!("status: reading {:?}", path))?;
     plan::parse(&text).with_context(|| format!("status: parsing {:?}", path))
 }
 
@@ -330,14 +375,20 @@ mod tests {
             "report: {report}"
         );
         assert!(report.contains("original branch: main"), "report: {report}");
-        assert!(report.contains("plan: phase 02 of 3 — Second"), "report: {report}");
+        assert!(
+            report.contains("plan: phase 02 of 3 — Second"),
+            "report: {report}"
+        );
         assert!(report.contains("completed: 01"), "report: {report}");
         assert!(
             report.contains("deferred items: 2 (1 unchecked, 1 checked)"),
             "report: {report}"
         );
         assert!(report.contains("deferred phases: 1"), "report: {report}");
-        assert!(report.contains("tokens: input=100 output=50"), "report: {report}");
+        assert!(
+            report.contains("tokens: input=100 output=50"),
+            "report: {report}"
+        );
         assert!(
             report.contains("implementer: input=100 output=50"),
             "report: {report}"

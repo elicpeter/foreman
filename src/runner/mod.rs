@@ -422,9 +422,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             .await?
         {
             ValidationResult::Continue => {}
-            ValidationResult::Halt(reason) => {
-                return Ok(PhaseResult::Halted { phase_id, reason })
-            }
+            ValidationResult::Halt(reason) => return Ok(PhaseResult::Halted { phase_id, reason }),
         }
 
         let test_runner = if self.skip_tests {
@@ -434,9 +432,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             project_tests::detect(&self.workspace, self.config.tests.command.as_deref())
         };
         if let Some(runner) = &test_runner {
-            let outcome = self
-                .run_tests(runner, &phase_id, "tests", attempt)
-                .await?;
+            let outcome = self.run_tests(runner, &phase_id, "tests", attempt).await?;
             if !outcome.passed {
                 match self
                     .run_fixer_loop(&phase, runner, &plan_path, &deferred_path, outcome.summary)
@@ -470,9 +466,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             .await?
         {
             AuditPassResult::Continue => {}
-            AuditPassResult::Halted(reason) => {
-                return Ok(PhaseResult::Halted { phase_id, reason })
-            }
+            AuditPassResult::Halted(reason) => return Ok(PhaseResult::Halted { phase_id, reason }),
         }
 
         // Re-stage to capture anything the auditor added or modified. When the
@@ -516,8 +510,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 .context("runner: writing plan.md with advanced current_phase")?;
         }
 
-        state::save(&self.workspace, Some(&self.state))
-            .context("runner: persisting state.json")?;
+        state::save(&self.workspace, Some(&self.state)).context("runner: persisting state.json")?;
 
         let _ = self.events_tx.send(Event::PhaseCommitted {
             phase_id: phase_id.clone(),
@@ -592,8 +585,8 @@ impl<A: Agent, G: Git> Runner<A, G> {
         plan_path: &Path,
         deferred_path: &Path,
     ) -> Result<ValidationResult> {
-        let plan_pre = std::fs::read(plan_path)
-            .with_context(|| format!("runner: reading {:?}", plan_path))?;
+        let plan_pre =
+            std::fs::read(plan_path).with_context(|| format!("runner: reading {:?}", plan_path))?;
         let plan_hash = Snapshot::of_bytes(&plan_pre);
         let (deferred_pre, deferred_existed) = match std::fs::read(deferred_path) {
             Ok(b) => (b, true),
@@ -626,7 +619,9 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 ))));
             }
             StopReason::Error(msg) => {
-                return Ok(ValidationResult::Halt(HaltReason::AgentFailure(msg.clone())));
+                return Ok(ValidationResult::Halt(HaltReason::AgentFailure(
+                    msg.clone(),
+                )));
             }
         }
 
@@ -873,12 +868,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
         entry.input += tokens.input;
         entry.output += tokens.output;
         for (k, v) in &tokens.by_role {
-            let e = self
-                .state
-                .token_usage
-                .by_role
-                .entry(k.clone())
-                .or_default();
+            let e = self.state.token_usage.by_role.entry(k.clone()).or_default();
             e.input += v.input;
             e.output += v.output;
         }
@@ -964,10 +954,7 @@ enum AuditPassResult {
     Halted(HaltReason),
 }
 
-async fn forward_agent_events(
-    mut rx: mpsc::Receiver<AgentEvent>,
-    tx: broadcast::Sender<Event>,
-) {
+async fn forward_agent_events(mut rx: mpsc::Receiver<AgentEvent>, tx: broadcast::Sender<Event>) {
     while let Some(ev) = rx.recv().await {
         match ev {
             AgentEvent::Stdout(line) => {
@@ -1033,18 +1020,33 @@ pub async fn log_events(mut rx: broadcast::Receiver<Event>) {
 }
 
 fn log_event_line(event: &Event) {
+    use crate::style::{self, col};
+    let c = style::use_color_stderr();
+
+    let fm = col(c, style::BOLD_CYAN, "[foreman]");
+
     match event {
         Event::PhaseStarted {
             phase_id,
             title,
             attempt,
         } => {
+            let rule = col(c, style::DARK_GRAY, &"─".repeat(60));
+            if c {
+                eprintln!("{rule}");
+            }
             eprintln!(
-                "[foreman] phase {phase_id} ({title}) — attempt {attempt}",
-                phase_id = phase_id,
-                title = title,
-                attempt = attempt
+                "{} {}",
+                col(c, style::BOLD_CYAN, "[foreman]"),
+                col(
+                    c,
+                    style::BOLD_WHITE,
+                    &format!("phase {phase_id} ({title}) — attempt {attempt}")
+                )
             );
+            if c {
+                eprintln!("{rule}");
+            }
         }
         Event::FixerStarted {
             phase_id,
@@ -1052,49 +1054,121 @@ fn log_event_line(event: &Event) {
             attempt,
         } => {
             eprintln!(
-                "[foreman] phase {phase_id} fixer attempt {fixer_attempt} (total dispatch {attempt})",
-                phase_id = phase_id,
-                fixer_attempt = fixer_attempt,
-                attempt = attempt,
+                "{fm} {}",
+                col(
+                    c,
+                    style::YELLOW,
+                    &format!(
+                        "phase {phase_id} fixer attempt {fixer_attempt} (total dispatch {attempt})"
+                    )
+                )
             );
         }
         Event::AuditorStarted { phase_id, attempt } => {
             eprintln!(
-                "[foreman] phase {phase_id} auditor (total dispatch {attempt})",
-                phase_id = phase_id,
-                attempt = attempt,
+                "{fm} {}",
+                col(
+                    c,
+                    style::BLUE,
+                    &format!("phase {phase_id} auditor (total dispatch {attempt})")
+                )
             );
         }
         Event::AuditorSkippedNoChanges { phase_id } => {
             eprintln!(
-                "[foreman] phase {phase_id} auditor skipped: no code changes to audit"
+                "{fm} {}",
+                col(
+                    c,
+                    style::DIM,
+                    &format!("phase {phase_id} auditor skipped: no code changes to audit")
+                )
             );
         }
-        Event::AgentStdout(line) => eprintln!("[agent] {line}"),
-        Event::AgentStderr(line) => eprintln!("[agent:err] {line}"),
-        Event::AgentToolUse(name) => eprintln!("[agent:tool] {name}"),
-        Event::TestStarted => eprintln!("[foreman] running tests"),
-        Event::TestFinished { passed, summary } => {
-            let label = if *passed { "tests passed" } else { "tests failed" };
-            eprintln!("[foreman] {label}: {summary}");
+        Event::AgentStdout(line) => {
+            eprintln!("{} {line}", col(c, style::DIM, "[agent]"));
         }
-        Event::TestsSkipped => eprintln!("[foreman] no test runner detected; skipping"),
+        Event::AgentStderr(line) => {
+            eprintln!(
+                "{} {}",
+                col(c, style::RED, "[agent:err]"),
+                col(c, style::RED, line)
+            );
+        }
+        Event::AgentToolUse(name) => {
+            eprintln!(
+                "{}",
+                col(c, style::DARK_GRAY, &format!("[agent:tool] {name}"))
+            );
+        }
+        Event::TestStarted => {
+            eprintln!("{fm} {}", col(c, style::MAGENTA, "running tests"));
+        }
+        Event::TestFinished { passed, summary } => {
+            if *passed {
+                eprintln!(
+                    "{fm} {}",
+                    col(c, style::BOLD_GREEN, &format!("tests passed: {summary}"))
+                );
+            } else {
+                eprintln!(
+                    "{fm} {}",
+                    col(c, style::BOLD_RED, &format!("tests failed: {summary}"))
+                );
+            }
+        }
+        Event::TestsSkipped => {
+            eprintln!(
+                "{fm} {}",
+                col(c, style::DIM, "no test runner detected; skipping")
+            );
+        }
         Event::PhaseCommitted {
             phase_id,
-            commit: Some(c),
+            commit: Some(hash),
         } => {
-            eprintln!("[foreman] phase {phase_id} committed: {c}");
+            eprintln!(
+                "{fm} {}",
+                col(
+                    c,
+                    style::GREEN,
+                    &format!("phase {phase_id} committed: {hash}")
+                )
+            );
         }
         Event::PhaseCommitted {
             phase_id,
             commit: None,
         } => {
-            eprintln!("[foreman] phase {phase_id} produced no code changes; no commit");
+            eprintln!(
+                "{fm} {}",
+                col(
+                    c,
+                    style::DIM,
+                    &format!("phase {phase_id} produced no code changes; no commit")
+                )
+            );
         }
         Event::PhaseHalted { phase_id, reason } => {
-            eprintln!("[foreman] phase {phase_id} halted: {reason}");
+            eprintln!(
+                "{} {}",
+                col(c, style::BOLD_RED, "[foreman]"),
+                col(
+                    c,
+                    style::BOLD_RED,
+                    &format!("phase {phase_id} halted: {reason}")
+                )
+            );
         }
-        Event::RunFinished => eprintln!("[foreman] run finished"),
+        Event::RunFinished => {
+            let rule = col(c, style::BOLD_GREEN, &"─".repeat(60));
+            if c {
+                eprintln!("{rule}");
+            }
+            eprintln!("{}", col(c, style::BOLD_GREEN, "[foreman] run finished"));
+            if c {
+                eprintln!("{rule}");
+            }
+        }
     }
 }
 

@@ -89,12 +89,7 @@ impl Agent for ScriptedAgent {
         events: mpsc::Sender<AgentEvent>,
         _cancel: CancellationToken,
     ) -> Result<AgentOutcome> {
-        let script = self
-            .scripts
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_default();
+        let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
         for (rel, bytes) in &script.writes {
             let path = req.workdir.join(rel);
             if let Some(parent) = path.parent() {
@@ -255,11 +250,20 @@ async fn run_advances_through_three_phase_plan() {
         Script::default().write("src/phase_03.rs", b"//! phase 3\n"),
     ]);
 
-    let (mut runner, _branch_git) =
-        build_runner(dir.path(), THREE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let (mut runner, _branch_git) = build_runner(
+        dir.path(),
+        THREE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let summary = runner.run().await.unwrap();
-    assert!(matches!(summary, RunSummary::Finished), "summary: {summary:?}");
+    assert!(
+        matches!(summary, RunSummary::Finished),
+        "summary: {summary:?}"
+    );
 
     let plan_after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
     let plan = plan::parse(&plan_after).expect("plan still parses");
@@ -299,9 +303,17 @@ async fn halts_on_plan_tamper_and_restores_snapshot() {
     init_git_repo(dir.path());
 
     let bogus_plan = "---\ncurrent_phase: \"99\"\n---\n\n# Phase 99: bogus\n";
-    let agent = ScriptedAgent::new(vec![Script::default().write("plan.md", bogus_plan.as_bytes())]);
-    let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("plan.md", bogus_plan.as_bytes())
+    ]);
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -331,9 +343,17 @@ async fn halts_on_invalid_deferred_and_restores() {
     init_git_repo(dir.path());
 
     let bad_deferred = "## Garbage\n\n- not valid\n";
-    let agent = ScriptedAgent::new(vec![Script::default().write("deferred.md", bad_deferred.as_bytes())]);
-    let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("deferred.md", bad_deferred.as_bytes())
+    ]);
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -365,7 +385,9 @@ async fn halts_on_test_failure_with_no_fixer() {
     // "implementer fails the suite" path, not the fixer loop.
     config.retries.fixer_max_attempts = 0;
 
-    let agent = ScriptedAgent::new(vec![Script::default().write("src/lib.rs", b"// placeholder\n")]);
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("src/lib.rs", b"// placeholder\n")
+    ]);
     let (mut runner, _g) =
         build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, config, agent).await;
 
@@ -373,7 +395,10 @@ async fn halts_on_test_failure_with_no_fixer() {
     match summary {
         RunSummary::Halted { phase_id, reason } => {
             assert_eq!(phase_id.as_str(), "01");
-            assert!(matches!(reason, HaltReason::TestsFailed(_)), "got {reason:?}");
+            assert!(
+                matches!(reason, HaltReason::TestsFailed(_)),
+                "got {reason:?}"
+            );
         }
         other => panic!("expected halt, got {other:?}"),
     }
@@ -396,9 +421,17 @@ async fn advances_with_no_commit_when_only_deferred_changed() {
     init_git_repo(dir.path());
 
     let new_deferred = "## Deferred items\n\n- [ ] open item from agent\n\n## Deferred phases\n";
-    let agent = ScriptedAgent::new(vec![Script::default().write("deferred.md", new_deferred.as_bytes())]);
-    let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("deferred.md", new_deferred.as_bytes())
+    ]);
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let summary = runner.run().await.unwrap();
     assert!(matches!(summary, RunSummary::Finished));
@@ -419,7 +452,11 @@ async fn advances_with_no_commit_when_only_deferred_changed() {
     // State still records phase as completed.
     let state = foreman::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(
-        state.completed.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        state
+            .completed
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>(),
         vec!["01"]
     );
 }
@@ -433,8 +470,14 @@ async fn mixed_changes_with_plan_tamper_halts_before_commit() {
     let agent = ScriptedAgent::new(vec![Script::default()
         .write("src/foo.rs", b"// real change\n")
         .write("plan.md", bogus_plan.as_bytes())]);
-    let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -465,8 +508,14 @@ async fn agent_failure_halts_with_agent_failure_reason() {
         exit_code: Some(2),
         ..Script::default()
     }]);
-    let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -505,14 +554,8 @@ async fn fixer_succeeds_on_attempt_2_and_phase_commits() {
         Script::default().write(".pass-marker", b""),
     ]);
 
-    let (mut runner, _g) = build_runner(
-        dir.path(),
-        ONE_PHASE_PLAN,
-        EMPTY_DEFERRED,
-        config,
-        agent,
-    )
-    .await;
+    let (mut runner, _g) =
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, config, agent).await;
 
     let summary = runner.run().await.unwrap();
     assert!(
@@ -539,7 +582,11 @@ async fn fixer_succeeds_on_attempt_2_and_phase_commits() {
         "attempts should reflect 1 implementer + 2 fixer dispatches"
     );
     assert_eq!(
-        state.completed.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        state
+            .completed
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>(),
         vec!["01"]
     );
 
@@ -578,14 +625,8 @@ async fn fixer_exhausts_retries_then_halts_with_tests_failed() {
         Script::default().write("src/fix2.rs", b"// fixer attempt 2\n"),
     ]);
 
-    let (mut runner, _g) = build_runner(
-        dir.path(),
-        ONE_PHASE_PLAN,
-        EMPTY_DEFERRED,
-        config,
-        agent,
-    )
-    .await;
+    let (mut runner, _g) =
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, config, agent).await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -719,7 +760,9 @@ async fn auditor_inlines_small_fix_and_commits_combined_diff() {
 
     // Audit log written under the conventional path.
     assert!(
-        dir.path().join(".foreman/logs/phase-01-audit-1.log").exists(),
+        dir.path()
+            .join(".foreman/logs/phase-01-audit-1.log")
+            .exists(),
         "phase-01-audit-1.log must exist after the auditor pass"
     );
 
@@ -753,7 +796,8 @@ async fn auditor_defers_large_finding_to_deferred_md() {
 
     let config = Config::default();
 
-    let auditor_deferred = "## Deferred items\n\n- [ ] auditor: refactor the foo module\n\n## Deferred phases\n";
+    let auditor_deferred =
+        "## Deferred items\n\n- [ ] auditor: refactor the foo module\n\n## Deferred phases\n";
     let agent = ScriptedAgent::new(vec![
         Script::default().write("src/lib.rs", b"// implementer\n"),
         // Auditor only appends to deferred.md; no code changes.
@@ -795,7 +839,7 @@ async fn auditor_skipped_when_implementer_only_touched_planning_artifacts() {
 
     let new_deferred = "## Deferred items\n\n- [ ] open item\n\n## Deferred phases\n";
     let agent = ScriptedAgent::new(vec![
-        Script::default().write("deferred.md", new_deferred.as_bytes()),
+        Script::default().write("deferred.md", new_deferred.as_bytes())
     ]);
 
     let (mut runner, _g) = build_runner(
@@ -908,19 +952,26 @@ async fn audit_disabled_path_skips_auditor_entirely() {
     init_git_repo(dir.path());
 
     let agent = ScriptedAgent::new(vec![
-        Script::default().write("src/lib.rs", b"// implementer\n"),
+        Script::default().write("src/lib.rs", b"// implementer\n")
     ]);
 
-    let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let mut rx = runner.subscribe();
     let collector = tokio::spawn(async move {
         let mut saw_audit_event = false;
         loop {
             match rx.recv().await {
-                Ok(Event::AuditorStarted { .. })
-                | Ok(Event::AuditorSkippedNoChanges { .. }) => saw_audit_event = true,
+                Ok(Event::AuditorStarted { .. }) | Ok(Event::AuditorSkippedNoChanges { .. }) => {
+                    saw_audit_event = true
+                }
                 Ok(_) => {}
                 Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => break,
@@ -961,8 +1012,14 @@ async fn log_events_returns_after_run_finished_even_with_runner_alive() {
         Script::default().write("src/p3.rs", b"// 3\n"),
     ]);
 
-    let (mut runner, _g) =
-        build_runner(dir.path(), THREE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        THREE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let rx = runner.subscribe();
     let logger = tokio::spawn(foreman::runner::log_events(rx));
@@ -992,8 +1049,14 @@ async fn log_events_returns_after_phase_halted_even_with_runner_alive() {
         ..Script::default()
     }]);
 
-    let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let rx = runner.subscribe();
     let logger = tokio::spawn(foreman::runner::log_events(rx));
@@ -1023,14 +1086,24 @@ async fn skip_tests_bypasses_test_detection_and_still_advances() {
     // on, the runner never invokes it. The body is intentionally not a valid
     // crate (no `[package]` section) — if the runner accidentally invoked
     // cargo here the test would fail loudly.
-    fs::write(dir.path().join("Cargo.toml"), b"# placeholder, no package\n").unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        b"# placeholder, no package\n",
+    )
+    .unwrap();
 
     let agent = ScriptedAgent::new(vec![
-        Script::default().write("src/lib.rs", b"// implementer\n"),
+        Script::default().write("src/lib.rs", b"// implementer\n")
     ]);
 
-    let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        audit_disabled(),
+        agent,
+    )
+    .await;
     runner = runner.skip_tests(true);
 
     let mut rx = runner.subscribe();
@@ -1055,7 +1128,10 @@ async fn skip_tests_bypasses_test_detection_and_still_advances() {
     drop(runner);
     let (saw_skipped, saw_started) = collector.await.unwrap();
     assert!(saw_skipped, "TestsSkipped must fire when skip_tests is on");
-    assert!(!saw_started, "TestStarted must not fire when skip_tests is on");
+    assert!(
+        !saw_started,
+        "TestStarted must not fire when skip_tests is on"
+    );
 
     // The agent's code change still landed.
     let log = git_log_oneline(dir.path());
@@ -1063,7 +1139,11 @@ async fn skip_tests_bypasses_test_detection_and_still_advances() {
         .iter()
         .filter(|l| l.contains("[foreman] phase"))
         .collect();
-    assert_eq!(phase_commits.len(), 1, "expected a phase commit; log:\n{log:?}");
+    assert_eq!(
+        phase_commits.len(),
+        1,
+        "expected a phase commit; log:\n{log:?}"
+    );
 }
 
 /// Helper for the budget tests: builds a [`TokenUsage`] with the supplied
@@ -1111,7 +1191,10 @@ async fn token_budget_halts_run_before_next_phase_dispatch() {
             match reason {
                 HaltReason::BudgetExceeded(msg) => {
                     assert!(msg.contains("token"), "msg: {msg}");
-                    assert!(msg.contains("1500"), "msg should report current usage: {msg}");
+                    assert!(
+                        msg.contains("1500"),
+                        "msg should report current usage: {msg}"
+                    );
                 }
                 other => panic!("expected BudgetExceeded, got {other:?}"),
             }
@@ -1134,7 +1217,11 @@ async fn token_budget_halts_run_before_next_phase_dispatch() {
     // State reflects phase 1 completed and the implementer's per-role usage.
     let state = foreman::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(
-        state.completed.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        state
+            .completed
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>(),
         vec!["01"]
     );
     let impl_usage = state.token_usage.by_role.get("implementer").unwrap();
@@ -1230,7 +1317,7 @@ async fn budget_check_fires_for_first_dispatch_when_usage_already_at_cap() {
     git.checkout(&state_obj.branch).await.unwrap();
 
     let agent = ScriptedAgent::new(vec![
-        Script::default().write("src/never.rs", b"// should not appear\n"),
+        Script::default().write("src/never.rs", b"// should not appear\n")
     ]);
     let runner_git = ShellGit::new(dir.path());
     let mut runner = foreman::runner::Runner::new(
@@ -1247,7 +1334,10 @@ async fn budget_check_fires_for_first_dispatch_when_usage_already_at_cap() {
     match summary {
         RunSummary::Halted { phase_id, reason } => {
             assert_eq!(phase_id.as_str(), "01");
-            assert!(matches!(reason, HaltReason::BudgetExceeded(_)), "got {reason:?}");
+            assert!(
+                matches!(reason, HaltReason::BudgetExceeded(_)),
+                "got {reason:?}"
+            );
         }
         other => panic!("expected halt, got {other:?}"),
     }

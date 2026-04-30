@@ -251,7 +251,10 @@ const README_FILES: &[&str] = &["README.md", "README", "README.txt", "README.rst
 
 fn collect_repo_summary(workspace: &Path) -> Result<String> {
     let mut sections: Vec<String> = Vec::new();
-    sections.push(format!("Top-level entries:\n{}", top_level_listing(workspace)?));
+    sections.push(format!(
+        "Top-level entries:\n{}",
+        top_level_listing(workspace)?
+    ));
     if let Some(s) = collect_files(workspace, MANIFEST_FILES, "Package manifests")? {
         sections.push(s);
     }
@@ -268,8 +271,9 @@ fn top_level_listing(workspace: &Path) -> Result<String> {
             return Ok("(workspace is empty)".to_string())
         }
         Err(e) => {
-            return Err(anyhow::Error::new(e)
-                .context(format!("plan: listing {}", workspace.display())));
+            return Err(
+                anyhow::Error::new(e).context(format!("plan: listing {}", workspace.display()))
+            );
         }
     };
 
@@ -329,8 +333,9 @@ fn collect_files(workspace: &Path, names: &[&str], header: &str) -> Result<Optio
                 continue;
             }
             Err(e) => {
-                return Err(anyhow::Error::new(e)
-                    .context(format!("plan: reading {}", path.display())))
+                return Err(
+                    anyhow::Error::new(e).context(format!("plan: reading {}", path.display()))
+                )
             }
         };
         let trimmed = truncate_for_summary(&text);
@@ -419,7 +424,10 @@ current_phase: \"01\"
 
         assert!(err.to_string().contains("--force"), "err: {err}");
         let after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
-        assert_eq!(after, preexisting, "plan.md must be untouched without --force");
+        assert_eq!(
+            after, preexisting,
+            "plan.md must be untouched without --force"
+        );
     }
 
     #[tokio::test]
@@ -446,7 +454,9 @@ current_phase: \"01\"
             "garbage without frontmatter\n".to_string(),
             CANNED_PLAN.to_string(),
         ]);
-        let outcome = run_with_agent(dir.path(), "g", false, &agent).await.unwrap();
+        let outcome = run_with_agent(dir.path(), "g", false, &agent)
+            .await
+            .unwrap();
         assert_eq!(outcome.attempts, 2);
         let written = fs::read_to_string(dir.path().join("plan.md")).unwrap();
         assert_eq!(written, CANNED_PLAN);
@@ -492,7 +502,9 @@ current_phase: \"01\"
         // dir exists even if the agent didn't write the log itself (DryRun).
         let dir = tempdir().unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
-        let _ = run_with_agent(dir.path(), "g", false, &agent).await.unwrap();
+        let _ = run_with_agent(dir.path(), "g", false, &agent)
+            .await
+            .unwrap();
         assert!(dir.path().join(".foreman/logs").is_dir());
     }
 
@@ -588,12 +600,7 @@ current_phase: \"01\"
             events: tokio::sync::mpsc::Sender<AgentEvent>,
             _cancel: tokio_util::sync::CancellationToken,
         ) -> Result<crate::agent::AgentOutcome> {
-            let body = self
-                .bodies
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or_default();
+            let body = self.bodies.lock().unwrap().pop_front().unwrap_or_default();
             let _ = events.send(AgentEvent::Stdout(body)).await;
             Ok(crate::agent::AgentOutcome {
                 exit_code: 0,
@@ -603,5 +610,4 @@ current_phase: \"01\"
             })
         }
     }
-
 }

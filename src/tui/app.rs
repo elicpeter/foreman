@@ -207,7 +207,11 @@ impl App {
                 self.activity = Activity::Tests;
             }
             Event::TestFinished { passed, summary } => {
-                let label = if passed { "tests passed" } else { "tests failed" };
+                let label = if passed {
+                    "tests passed"
+                } else {
+                    "tests failed"
+                };
                 self.push_output(format!("[{label}] {summary}"));
             }
             Event::TestsSkipped => {
@@ -268,25 +272,41 @@ impl App {
             .map(|p| p.title.as_str())
             .unwrap_or("");
         let line1 = Line::from(vec![
-            Span::styled("foreman", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "foreman",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
-            Span::styled(format!("run {}", self.run_id), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("run {}", self.run_id),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw("  "),
-            Span::styled(format!("branch {}", self.branch), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("branch {}", self.branch),
+                Style::default().fg(Color::Magenta),
+            ),
         ]);
+        let act_color = activity_color(&self.activity);
         let line2 = Line::from(vec![
-            Span::raw("phase "),
+            Span::styled("phase ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.current_phase.to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" — "),
-            Span::raw(title.to_string()),
+            Span::styled(" — ", Style::default().fg(Color::DarkGray)),
+            Span::styled(title.to_string(), Style::default().fg(Color::White)),
             Span::raw("   "),
+            Span::styled("[", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("[{}]", self.activity),
-                Style::default().fg(activity_color(&self.activity)),
+                format!("{}", self.activity),
+                Style::default().fg(act_color).add_modifier(Modifier::BOLD),
             ),
+            Span::styled("]", Style::default().fg(Color::DarkGray)),
         ]);
         let block = Block::default().borders(Borders::BOTTOM);
         let para = Paragraph::new(vec![line1, line2]).block(block);
@@ -320,19 +340,58 @@ impl App {
                 } else {
                     String::new()
                 };
-                let style = status_style(&status);
+                let glyph_style = status_style(&status);
+                let (id_style, title_style) = match &status {
+                    PhaseStatus::Running => (
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    PhaseStatus::Completed => (
+                        Style::default().fg(Color::Green),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    PhaseStatus::Failed(_) => (
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        Style::default().fg(Color::Red),
+                    ),
+                    PhaseStatus::Pending => (
+                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                };
                 let line = Line::from(vec![
-                    Span::styled(format!("{glyph} "), style),
-                    Span::styled(format!("{} ", phase.id), Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(phase.title.clone()),
+                    Span::styled(format!("{glyph} "), glyph_style),
+                    Span::styled(format!("{} ", phase.id), id_style),
+                    Span::styled(phase.title.clone(), title_style),
                     Span::styled(tail, Style::default().fg(Color::DarkGray)),
                 ]);
                 ListItem::new(line)
             })
             .collect();
+        let border_style = if self
+            .phase_status
+            .values()
+            .any(|s| matches!(s, PhaseStatus::Running))
+        {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" phases ({}/{}) ", self.completed.len(), self.plan.phases.len()));
+            .border_style(border_style)
+            .title(Span::styled(
+                format!(
+                    " phases ({}/{}) ",
+                    self.completed.len(),
+                    self.plan.phases.len()
+                ),
+                Style::default().fg(Color::DarkGray),
+            ));
         let list = List::new(items).block(block);
         frame.render_widget(list, area);
     }
@@ -346,14 +405,23 @@ impl App {
             .output
             .iter()
             .skip(start)
-            .map(|s| Line::from(s.clone()))
+            .map(|s| style_output_line(s))
             .collect();
-        let title = if self.paused {
-            " agent output [paused] "
+        let (title_str, title_style) = if self.paused {
+            (
+                " agent output [paused] ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            " agent output "
+            (" agent output ", Style::default().fg(Color::DarkGray))
         };
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let border_style = Style::default().fg(Color::DarkGray);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(title_str, title_style));
         let para = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false });
@@ -361,17 +429,66 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let pause_label = if self.paused { "p resume" } else { "p pause" };
+        let pause_label = if self.paused { "resume" } else { "pause" };
+        let key_style = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let hint_style = Style::default().fg(Color::DarkGray);
         let line = Line::from(vec![
-            Span::styled("q quit", Style::default().fg(Color::Yellow)),
+            Span::styled("q", key_style),
+            Span::styled(" quit", hint_style),
             Span::raw("   "),
-            Span::styled(pause_label, Style::default().fg(Color::Yellow)),
+            Span::styled("p", key_style),
+            Span::styled(format!(" {pause_label}"), hint_style),
             Span::raw("   "),
-            Span::styled("a abort", Style::default().fg(Color::Yellow)),
+            Span::styled("a", key_style),
+            Span::styled(" abort", hint_style),
         ])
         .alignment(Alignment::Left);
         let para = Paragraph::new(line);
         frame.render_widget(para, area);
+    }
+}
+
+fn style_output_line(s: &str) -> Line<'static> {
+    if s.starts_with("err: ") {
+        Line::from(Span::styled(s.to_owned(), Style::default().fg(Color::Red)))
+    } else if s.starts_with("tool: ") {
+        Line::from(Span::styled(
+            s.to_owned(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM),
+        ))
+    } else if s.starts_with("[tests passed]") {
+        Line::from(Span::styled(
+            s.to_owned(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else if s.starts_with("[tests failed]") {
+        Line::from(Span::styled(
+            s.to_owned(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+    } else if s.starts_with("[commit]") {
+        Line::from(Span::styled(s.to_owned(), Style::default().fg(Color::Cyan)))
+    } else if s.starts_with("[halt]") {
+        Line::from(Span::styled(
+            s.to_owned(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+    } else if s.starts_with("[tests]") {
+        Line::from(Span::styled(
+            s.to_owned(),
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Line::from(Span::styled(
+            s.to_owned(),
+            Style::default().fg(Color::White),
+        ))
     }
 }
 
@@ -387,7 +504,9 @@ fn status_glyph(s: &PhaseStatus) -> &'static str {
 fn status_style(s: &PhaseStatus) -> Style {
     match s {
         PhaseStatus::Pending => Style::default().fg(Color::DarkGray),
-        PhaseStatus::Running => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        PhaseStatus::Running => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
         PhaseStatus::Completed => Style::default().fg(Color::Green),
         PhaseStatus::Failed(_) => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
     }

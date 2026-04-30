@@ -282,8 +282,6 @@ src/
 tests/               integration tests
 ```
 
-See `plan.md` for the phase-by-phase design log.
-
 ## License
 
 MIT OR Apache-2.0.

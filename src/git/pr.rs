@@ -55,9 +55,7 @@ pub fn pr_title(summary: &PrSummary<'_>) -> String {
         .phase(last_id)
         .map(|p| p.title.as_str())
         .unwrap_or("(unknown)");
-    format!(
-        "foreman: {count} phases ({first_id}–{last_id}) — {first_title} … {last_title}"
-    )
+    format!("foreman: {count} phases ({first_id}–{last_id}) — {first_title} … {last_title}")
 }
 
 /// Multi-section markdown PR body. Sections are emitted in this order:
@@ -259,7 +257,10 @@ mod tests {
         };
         let body = pr_body(&summary);
         assert!(body.contains("## Run\n"), "body: {body}");
-        assert!(body.contains("- run id: `20260429T143022Z`"), "body: {body}");
+        assert!(
+            body.contains("- run id: `20260429T143022Z`"),
+            "body: {body}"
+        );
         assert!(
             body.contains("- branch: `foreman/run-20260429T143022Z`"),
             "body: {body}"

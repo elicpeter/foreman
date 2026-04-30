@@ -16,12 +16,14 @@ use anyhow::{bail, Context, Result};
 
 use crate::git::{Git, ShellGit};
 use crate::state;
+use crate::style::{self, col};
 
 /// Top-level entry point for the `abort` subcommand.
 ///
 /// `checkout_original` controls whether HEAD is moved back to the
 /// pre-run branch after the abort flag is persisted.
 pub async fn run(workspace: PathBuf, checkout_original: bool) -> Result<()> {
+    let c = style::use_color_stdout();
     let mut state = match state::load(&workspace)
         .with_context(|| format!("abort: loading state in {:?}", workspace))?
     {
@@ -40,11 +42,13 @@ pub async fn run(workspace: PathBuf, checkout_original: bool) -> Result<()> {
         let mut h = stdout.lock();
         let _ = writeln!(
             h,
-            "run {} on {} was already aborted",
-            state.run_id, state.branch
+            "{} run {} on {} was already aborted",
+            col(c, style::YELLOW, "warning:"),
+            state.run_id,
+            state.branch
         );
         if checkout_original {
-            checkout_original_branch(&workspace, &state).await?;
+            checkout_original_branch(&workspace, &state, c).await?;
         }
         return Ok(());
     }
@@ -57,18 +61,24 @@ pub async fn run(workspace: PathBuf, checkout_original: bool) -> Result<()> {
     let mut h = stdout.lock();
     let _ = writeln!(
         h,
-        "aborted run {} on branch {}",
-        state.run_id, state.branch
+        "{} run {} on branch {}",
+        col(c, style::BOLD_RED, "aborted"),
+        state.run_id,
+        state.branch
     );
 
     if checkout_original {
-        checkout_original_branch(&workspace, &state).await?;
+        checkout_original_branch(&workspace, &state, c).await?;
     }
 
     Ok(())
 }
 
-async fn checkout_original_branch(workspace: &Path, state: &state::RunState) -> Result<()> {
+async fn checkout_original_branch(
+    workspace: &Path,
+    state: &state::RunState,
+    c: bool,
+) -> Result<()> {
     let Some(original) = state.original_branch.as_deref() else {
         bail!(
             "abort: --checkout-original requested but no original branch is recorded for run {}",
@@ -81,6 +91,12 @@ async fn checkout_original_branch(workspace: &Path, state: &state::RunState) -> 
         .with_context(|| format!("abort: checking out original branch {:?}", original))?;
     let stdout = std::io::stdout();
     let mut h = stdout.lock();
-    let _ = writeln!(h, "checked out {} (was on {})", original, state.branch);
+    let _ = writeln!(
+        h,
+        "{} {} {}",
+        col(c, style::GREEN, "checked out"),
+        original,
+        col(c, style::DIM, &format!("(was on {})", state.branch))
+    );
     Ok(())
 }

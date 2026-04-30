@@ -12,6 +12,7 @@ pub mod plan;
 pub mod prompts;
 pub mod runner;
 pub mod state;
+pub mod style;
 pub mod tests;
 pub mod tui;
 pub mod util;
