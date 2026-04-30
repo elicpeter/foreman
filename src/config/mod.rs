@@ -40,6 +40,9 @@ pub struct Config {
     pub audit: AuditConfig,
     /// Git integration tunables (branch naming, PR creation).
     pub git: GitConfig,
+    /// Test runner overrides — by default the runner auto-detects from the
+    /// project layout (see [`crate::tests::detect`]).
+    pub tests: TestsConfig,
 }
 
 /// Model identifiers used for each agent role. Strings are passed verbatim to
@@ -140,6 +143,19 @@ impl Default for GitConfig {
     }
 }
 
+/// Test-runner tunables. When `command` is `None` the runner auto-detects
+/// from the project layout (see [`crate::tests::detect`]); otherwise the
+/// configured command is used verbatim, bypassing detection entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestsConfig {
+    /// Shell-style command to run the project's test suite (e.g.,
+    /// `"cargo test --workspace"`). Whitespace-split into program + args, so
+    /// shell metacharacters like pipes or env-var assignments require an
+    /// explicit `sh -c "..."` wrapper. `None` enables autodetection.
+    pub command: Option<String>,
+}
+
 /// Read the workspace's `foreman.toml`.
 ///
 /// A missing file returns [`Config::default()`] — foreman is usable without
@@ -189,6 +205,7 @@ fn find_unknown_keys(value: &toml::Value) -> Vec<String> {
             "retries" => &["fixer_max_attempts", "max_phase_attempts"],
             "audit" => &["enabled", "small_fix_line_limit"],
             "git" => &["branch_prefix", "create_pr"],
+            "tests" => &["command"],
             _ => {
                 out.push(section.clone());
                 continue;
@@ -223,6 +240,7 @@ mod tests {
         assert_eq!(cfg.audit.small_fix_line_limit, 30);
         assert_eq!(cfg.git.branch_prefix, "foreman/run-");
         assert!(!cfg.git.create_pr);
+        assert!(cfg.tests.command.is_none());
     }
 
     #[test]
@@ -251,6 +269,9 @@ small_fix_line_limit = 5
 [git]
 branch_prefix = \"work/\"
 create_pr = true
+
+[tests]
+command = \"make check\"
 ";
         let cfg = parse(text).unwrap();
         assert_eq!(cfg.models.planner, "a");
@@ -263,6 +284,7 @@ create_pr = true
         assert_eq!(cfg.audit.small_fix_line_limit, 5);
         assert_eq!(cfg.git.branch_prefix, "work/");
         assert!(cfg.git.create_pr);
+        assert_eq!(cfg.tests.command.as_deref(), Some("make check"));
     }
 
     #[test]
@@ -360,6 +382,9 @@ small_fix_line_limit = 10
 [git]
 branch_prefix = \"x/\"
 create_pr = false
+
+[tests]
+command = \"cargo test\"
 ";
         let value: toml::Value = toml::from_str(text).unwrap();
         assert!(find_unknown_keys(&value).is_empty());
