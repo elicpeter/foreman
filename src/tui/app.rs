@@ -31,7 +31,7 @@ pub enum PhaseStatus {
     /// Phase is the active dispatch.
     Running,
     /// Phase committed (or advanced without a commit, for excluded-only
-    /// changes); held in [`PhaseStatus::Committed`] for both cases.
+    /// changes — both land in this variant).
     Completed,
     /// Phase halted with the carried halt reason.
     Failed(String),

@@ -17,7 +17,9 @@ use super::run::{execute, StartMode};
 /// Top-level entry point for the `resume` subcommand. `tui` toggles the
 /// `ratatui` dashboard the same way [`crate::cli::run::run`] does. `pr` opts
 /// the resumed run into the post-run `gh pr create` step (see
-/// [`crate::cli::run::run`]).
-pub async fn run(workspace: PathBuf, tui: bool, pr: bool) -> Result<()> {
-    execute(workspace, tui, pr, StartMode::Resume).await
+/// [`crate::cli::run::run`]). `dry_run` mirrors `foreman run --dry-run`:
+/// the configured agent is swapped for a no-op so the resumed run can be
+/// exercised end-to-end without spending tokens.
+pub async fn run(workspace: PathBuf, tui: bool, pr: bool, dry_run: bool) -> Result<()> {
+    execute(workspace, tui, pr, dry_run, StartMode::Resume).await
 }

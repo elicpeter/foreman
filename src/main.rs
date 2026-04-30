@@ -6,19 +6,26 @@ use foreman::cli::{self, Cli};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
     let cli = Cli::parse();
+    init_tracing(&cli);
     cli::dispatch(cli).await
 }
 
-/// Configure `tracing-subscriber` from the environment.
+/// Configure `tracing-subscriber` from the CLI flags and environment.
 ///
-/// `FOREMAN_LOG` takes precedence over `RUST_LOG` so users can target the
-/// foreman binary without touching the broader Rust ecosystem default.
-fn init_tracing() {
+/// Precedence (highest first):
+/// 1. `FOREMAN_LOG` env var.
+/// 2. `RUST_LOG` env var.
+/// 3. `--verbose` / `-v` flag (`-v` → `debug`, `-vv`+ → `trace`).
+/// 4. Built-in default (`info`).
+///
+/// Env vars win over `--verbose` so per-process tuning ("just this run, give
+/// me trace on a single module") still works without removing the flag from a
+/// shell wrapper.
+fn init_tracing(cli: &Cli) {
     let filter = EnvFilter::try_from_env("FOREMAN_LOG")
         .or_else(|_| EnvFilter::try_from_default_env())
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| EnvFilter::new(cli.verbose_filter().unwrap_or("info")));
 
     tracing_subscriber::registry()
         .with(filter)

@@ -38,7 +38,7 @@ pub enum PlanParseError {
     #[error("plan.md contains no # Phase NN: headings")]
     NoPhases,
     /// A `# Phase` heading line could not be split into `<id>: <title>`.
-    #[error("plan.md heading on line {line} is malformed: {raw:?}")]
+    #[error("plan.md heading on line {line} is malformed: {raw:?} (expected `# Phase <id>: <title>`)")]
     BadHeading {
         /// 1-based line number of the offending heading.
         line: usize,

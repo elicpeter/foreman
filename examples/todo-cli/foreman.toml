@@ -1,0 +1,26 @@
+# todo-cli example — leans on the cheaper sonnet split for the auditor and
+# fixer roles since their work is small and focused. Bumped the fixer budget
+# to 3 because phase 03 has the most surface area for tests to flap on.
+
+[models]
+planner     = "claude-opus-4-7"
+implementer = "claude-opus-4-7"
+auditor     = "claude-sonnet-4-6"
+fixer       = "claude-sonnet-4-6"
+
+[retries]
+fixer_max_attempts = 3
+max_phase_attempts = 4
+
+[audit]
+enabled              = true
+small_fix_line_limit = 30
+
+[git]
+branch_prefix = "foreman/run-"
+create_pr     = false
+
+# Conservative cost guard so a runaway loop can't blow past a coffee's worth
+# of budget while you're watching it.
+[budgets]
+max_total_usd = 5.00

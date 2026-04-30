@@ -1,9 +1,9 @@
 //! `foreman run` — execute the plan against the configured agent.
 //!
 //! Loads the workspace's `foreman.toml`, `plan.md`, `deferred.md`, and
-//! `state.json`; ensures a per-run branch exists; spawns a [`broadcast`]
-//! subscriber that streams [`runner::Event`]s to stderr; then drives the
-//! runner until the plan completes or a phase halts.
+//! `state.json`; ensures a per-run branch exists; spawns a
+//! [`tokio::sync::broadcast`] subscriber that streams [`runner::Event`]s to
+//! stderr; then drives the runner until the plan completes or a phase halts.
 //!
 //! On a fresh run (state file is `null` or missing) this command derives a new
 //! `run_id` and per-run branch from the current UTC timestamp, captures the
@@ -24,12 +24,14 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 
 use crate::agent::claude_code::ClaudeCodeAgent;
+use crate::agent::dry_run::{DryRunAgent, DryRunFinal};
+use crate::agent::{Agent, AgentEvent};
 use crate::config;
 use crate::deferred::{self, DeferredDoc};
 use crate::git::{self, Git, PrSummary, ShellGit};
 use crate::plan::{self, Plan};
 use crate::runner::{self, RunSummary, Runner};
-use crate::state;
+use crate::state::{self, TokenUsage};
 use crate::tui;
 
 /// Whether [`execute`] is allowed to start a fresh run.
@@ -46,9 +48,11 @@ pub enum StartMode {
 /// `tui` toggles between the plain stderr logger (default) and the
 /// `ratatui` dashboard. `pr` opts into the post-run pull-request creation
 /// step described in [`execute`]; either it or `git.create_pr = true` in
-/// `foreman.toml` enables the step.
-pub async fn run(workspace: PathBuf, tui: bool, pr: bool) -> Result<()> {
-    execute(workspace, tui, pr, StartMode::Fresh).await
+/// `foreman.toml` enables the step. `dry_run` swaps the configured agent
+/// for the deterministic [`DryRunAgent`] so the run can be exercised
+/// end-to-end without any model spend.
+pub async fn run(workspace: PathBuf, tui: bool, pr: bool, dry_run: bool) -> Result<()> {
+    execute(workspace, tui, pr, dry_run, StartMode::Fresh).await
 }
 
 /// Shared runner driver used by both `foreman run` and `foreman resume`.
@@ -64,7 +68,39 @@ pub async fn run(workspace: PathBuf, tui: bool, pr: bool) -> Result<()> {
 /// the completed phases plus any remaining deferred work. PR creation
 /// failures are reported but do not change the function's exit status — the
 /// underlying run already succeeded.
-pub async fn execute(workspace: PathBuf, tui: bool, pr_flag: bool, mode: StartMode) -> Result<()> {
+///
+/// When `dry_run` is `true` the [`ClaudeCodeAgent`] is swapped for a
+/// scripted [`DryRunAgent`] that emits a single stdout marker and returns
+/// success with zero tokens. The runner is also told to
+/// [`Runner::skip_tests`], because the no-op agent never modifies the
+/// working tree and a flaky test suite would otherwise halt the dry-run
+/// after one phase. Per-phase commits are still attempted; they no-op
+/// because nothing was staged. The post-run PR step is suppressed in
+/// dry-run mode regardless of `pr_flag` / `git.create_pr` — opening a PR
+/// for a no-op branch would be a footgun.
+pub async fn execute(
+    workspace: PathBuf,
+    tui: bool,
+    pr_flag: bool,
+    dry_run: bool,
+    mode: StartMode,
+) -> Result<()> {
+    if dry_run {
+        execute_with_agent(workspace, tui, false, mode, dry_run_agent()).await
+    } else {
+        execute_with_agent(workspace, tui, pr_flag, mode, ClaudeCodeAgent::new()).await
+    }
+}
+
+async fn execute_with_agent<A: Agent + 'static>(
+    workspace: PathBuf,
+    tui: bool,
+    pr_flag: bool,
+    mode: StartMode,
+    agent: A,
+) -> Result<()> {
+    let dry_run = is_dry_run_agent(&agent);
+
     let config = config::load(&workspace)
         .with_context(|| format!("run: loading config in {:?}", workspace))?;
     let plan = load_plan(&workspace)?;
@@ -114,8 +150,8 @@ pub async fn execute(workspace: PathBuf, tui: bool, pr_flag: bool, mode: StartMo
 
     let want_pr = pr_flag || config.git.create_pr;
 
-    let agent = ClaudeCodeAgent::new();
-    let mut runner = Runner::new(workspace, config, plan, deferred, state, agent, git);
+    let mut runner =
+        Runner::new(workspace, config, plan, deferred, state, agent, git).skip_tests(dry_run);
 
     let summary = if tui {
         tui::run(&mut runner).await?
@@ -145,6 +181,26 @@ pub async fn execute(workspace: PathBuf, tui: bool, pr_flag: bool, mode: StartMo
             Err(anyhow!("run halted at phase {phase_id}: {reason}"))
         }
     }
+}
+
+/// Identifier the dry-run agent advertises via [`Agent::name`]. Used by the
+/// CLI layer to detect "is this a dry-run run?" without threading a separate
+/// boolean through every helper.
+const DRY_RUN_AGENT_NAME: &str = "foreman-dry-run";
+
+fn dry_run_agent() -> DryRunAgent {
+    DryRunAgent::new(DRY_RUN_AGENT_NAME)
+        .emit(AgentEvent::Stdout(
+            "[dry-run] no-op agent dispatched; making no edits".to_string(),
+        ))
+        .finish(DryRunFinal::Success {
+            exit_code: 0,
+            tokens: TokenUsage::default(),
+        })
+}
+
+fn is_dry_run_agent<A: Agent>(agent: &A) -> bool {
+    agent.name() == DRY_RUN_AGENT_NAME
 }
 
 /// Build a [`PrSummary`] from the just-finished runner and shell out to

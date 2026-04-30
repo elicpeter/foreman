@@ -944,6 +944,65 @@ async fn audit_disabled_path_skips_auditor_entirely() {
     assert_eq!(state.attempts.get(&pid("01")).copied(), Some(1));
 }
 
+/// `Runner::skip_tests(true)` short-circuits test detection: even when the
+/// workspace contains a recognized layout (a `Cargo.toml` here), the runner
+/// emits `TestsSkipped` and never spawns the suite. Phases still advance and
+/// per-phase commits happen when the agent staged code.
+#[tokio::test]
+async fn skip_tests_bypasses_test_detection_and_still_advances() {
+    use foreman::runner::Event;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
+    init_git_repo(dir.path());
+
+    // A real Cargo.toml would normally trigger `cargo test`; with skip_tests
+    // on, the runner never invokes it. The body is intentionally not a valid
+    // crate (no `[package]` section) — if the runner accidentally invoked
+    // cargo here the test would fail loudly.
+    fs::write(dir.path().join("Cargo.toml"), b"# placeholder, no package\n").unwrap();
+
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("src/lib.rs", b"// implementer\n"),
+    ]);
+
+    let (mut runner, _g) =
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+    runner = runner.skip_tests(true);
+
+    let mut rx = runner.subscribe();
+    let collector = tokio::spawn(async move {
+        let mut saw_skipped = false;
+        let mut saw_started = false;
+        loop {
+            match rx.recv().await {
+                Ok(Event::TestsSkipped) => saw_skipped = true,
+                Ok(Event::TestStarted) => saw_started = true,
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
+        }
+        (saw_skipped, saw_started)
+    });
+
+    let summary = runner.run().await.unwrap();
+    assert!(matches!(summary, RunSummary::Finished));
+
+    drop(runner);
+    let (saw_skipped, saw_started) = collector.await.unwrap();
+    assert!(saw_skipped, "TestsSkipped must fire when skip_tests is on");
+    assert!(!saw_started, "TestStarted must not fire when skip_tests is on");
+
+    // The agent's code change still landed.
+    let log = git_log_oneline(dir.path());
+    let phase_commits: Vec<&String> = log
+        .iter()
+        .filter(|l| l.contains("[foreman] phase"))
+        .collect();
+    assert_eq!(phase_commits.len(), 1, "expected a phase commit; log:\n{log:?}");
+}
+
 /// Helper for the budget tests: builds a [`TokenUsage`] with the supplied
 /// top-level totals and an empty `by_role` map.
 ///

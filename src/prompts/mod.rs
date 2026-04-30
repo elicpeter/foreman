@@ -7,9 +7,10 @@
 //!
 //! # Templating
 //!
-//! [`render`] is a deliberately small placeholder substituter: `{name}` is
-//! replaced with the value matching `name` in the supplied list, and the
-//! escapes `{{` and `}}` produce literal braces. There is no logic, no loops,
+//! The internal `render` helper is a deliberately small placeholder
+//! substituter: `{name}` is replaced with the value matching `name` in the
+//! supplied list, and the escapes `{{` and `}}` produce literal braces.
+//! There is no logic, no loops,
 //! no conditionals — anything that needs branching belongs in Rust, not in the
 //! template. Unknown placeholder names panic at run time, which surfaces typos
 //! in tests rather than letting them ship as garbled prompts.

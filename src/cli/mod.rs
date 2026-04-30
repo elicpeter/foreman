@@ -21,8 +21,26 @@ pub mod status;
     about = "Orchestrate coding agents through a phased plan"
 )]
 pub struct Cli {
+    /// Lower the log level for this invocation. `-v` enables debug output;
+    /// `-vv` enables trace. Equivalent to `FOREMAN_LOG=debug` /
+    /// `FOREMAN_LOG=trace`. The env var still wins when set.
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// Pick the `tracing-subscriber` filter directive implied by `--verbose`.
+    /// Returns `None` when no `-v` was passed (caller falls back to
+    /// `FOREMAN_LOG` / `RUST_LOG` / `info`).
+    pub fn verbose_filter(&self) -> Option<&'static str> {
+        match self.verbose {
+            0 => None,
+            1 => Some("debug"),
+            _ => Some("trace"),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -48,6 +66,12 @@ pub enum Command {
         /// `foreman.toml`; either source enables the post-run PR step.
         #[arg(long)]
         pr: bool,
+        /// Swap the configured agent for the deterministic `DryRunAgent`.
+        /// Lets users sanity-check the plan, config, branch, and event flow
+        /// end-to-end without any model spend; tests are skipped because the
+        /// agent makes no edits.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
     /// Print a summary of the current run.
     Status,
@@ -60,6 +84,10 @@ pub enum Command {
         /// via `gh pr create`. Mirrors `foreman run --pr`.
         #[arg(long)]
         pr: bool,
+        /// Swap the configured agent for the deterministic `DryRunAgent`.
+        /// Mirrors `foreman run --dry-run`.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
     /// Mark the active run as aborted. `foreman run` and `foreman resume`
     /// refuse to operate on an aborted state.
@@ -76,9 +104,13 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init => init::run(std::env::current_dir()?),
         Command::Plan { goal, force } => plan::run(std::env::current_dir()?, goal, force).await,
-        Command::Run { tui, pr } => run::run(std::env::current_dir()?, tui, pr).await,
+        Command::Run { tui, pr, dry_run } => {
+            run::run(std::env::current_dir()?, tui, pr, dry_run).await
+        }
         Command::Status => status::run(std::env::current_dir()?),
-        Command::Resume { tui, pr } => resume::run(std::env::current_dir()?, tui, pr).await,
+        Command::Resume { tui, pr, dry_run } => {
+            resume::run(std::env::current_dir()?, tui, pr, dry_run).await
+        }
         Command::Abort { checkout_original } => {
             abort::run(std::env::current_dir()?, checkout_original).await
         }

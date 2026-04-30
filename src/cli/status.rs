@@ -38,9 +38,9 @@ pub fn run(workspace: PathBuf) -> Result<()> {
 
 /// Build the human-readable status report. Pure function over the loaded
 /// state so tests can exercise it without shelling out to git for the
-/// last-commit lookup; the workspace is only used to query git, and
-/// [`last_commit_subject`] swallows errors so a non-git workspace still
-/// produces a useful report.
+/// last-commit lookup; the workspace is only used to query git, and the
+/// internal `last_commit_subject` helper swallows errors so a non-git
+/// workspace still produces a useful report.
 pub fn render_report(
     workspace: &Path,
     plan: &Plan,

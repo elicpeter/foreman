@@ -253,6 +253,12 @@ pub struct Runner<A: Agent, G: Git> {
     agent: A,
     git: G,
     events_tx: broadcast::Sender<Event>,
+    /// When `true`, [`Runner::run_phase`] skips test detection and execution.
+    /// Set by `foreman run --dry-run`, which dispatches the no-op
+    /// [`crate::agent::dry_run::DryRunAgent`]: since the agent never modifies
+    /// the working tree, running tests would only re-confirm whatever the
+    /// pre-run state was and risk halting the dry-run on a flaky suite.
+    skip_tests: bool,
 }
 
 impl<A: Agent, G: Git> Runner<A, G> {
@@ -280,7 +286,19 @@ impl<A: Agent, G: Git> Runner<A, G> {
             agent,
             git,
             events_tx,
+            skip_tests: false,
         }
+    }
+
+    /// Skip the per-phase test invocation entirely. Used by
+    /// `foreman run --dry-run` so a no-op agent does not get halted by a
+    /// pre-existing red test suite. The runner emits [`Event::TestsSkipped`]
+    /// in place of [`Event::TestStarted`] / [`Event::TestFinished`] so
+    /// subscribers (logger, TUI) still get a clear signal that tests were
+    /// considered.
+    pub fn skip_tests(mut self, skip: bool) -> Self {
+        self.skip_tests = skip;
+        self
     }
 
     /// Workspace this runner operates on.
@@ -399,10 +417,12 @@ impl<A: Agent, G: Git> Runner<A, G> {
             }
         }
 
-        let test_runner = project_tests::detect(
-            &self.workspace,
-            self.config.tests.command.as_deref(),
-        );
+        let test_runner = if self.skip_tests {
+            debug!("dry-run: skipping test detection and execution");
+            None
+        } else {
+            project_tests::detect(&self.workspace, self.config.tests.command.as_deref())
+        };
         if let Some(runner) = &test_runner {
             let outcome = self
                 .run_tests(runner, &phase_id, "tests", attempt)
@@ -419,7 +439,9 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 }
             }
         } else {
-            debug!("no test runner detected and no override configured; skipping tests");
+            if !self.skip_tests {
+                debug!("no test runner detected and no override configured; skipping tests");
+            }
             let _ = self.events_tx.send(Event::TestsSkipped);
         }
 
