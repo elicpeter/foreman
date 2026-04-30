@@ -19,6 +19,7 @@ pub mod init;
 pub mod interview;
 pub mod plan;
 pub mod play;
+pub mod prompts;
 pub mod rebuy;
 pub mod status;
 
@@ -118,6 +119,8 @@ pub enum Command {
         #[arg(long)]
         checkout_original: bool,
     },
+    /// Author and inspect grind prompt files (`ls`, `validate`, `new`).
+    Prompts(prompts::PromptsArgs),
 }
 
 /// Dispatch a parsed CLI invocation.
@@ -139,5 +142,6 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
         Command::Fold { checkout_original } => {
             fold::run(std::env::current_dir()?, checkout_original).await
         }
+        Command::Prompts(args) => prompts::run(std::env::current_dir()?, args),
     }
 }

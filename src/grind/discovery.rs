@@ -85,12 +85,7 @@ pub fn discover_prompts(opts: DiscoveryOptions) -> DiscoveryResult {
         );
         if let Some(home) = opts.home_dir.as_deref() {
             let global_dir = home.join(".pitboss").join("prompts");
-            load_dir(
-                &global_dir,
-                PromptSource::Global,
-                &mut by_name,
-                &mut errors,
-            );
+            load_dir(&global_dir, PromptSource::Global, &mut by_name, &mut errors);
         }
     }
 
@@ -221,9 +216,18 @@ mod tests {
     fn project_shadows_global_for_same_name() {
         let root = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
-        let project_path =
-            write_prompt(&project_dir(root.path()), "fp.md", "fp-hunter", "project body");
-        write_prompt(&global_dir(home.path()), "fp.md", "fp-hunter", "global body");
+        let project_path = write_prompt(
+            &project_dir(root.path()),
+            "fp.md",
+            "fp-hunter",
+            "project body",
+        );
+        write_prompt(
+            &global_dir(home.path()),
+            "fp.md",
+            "fp-hunter",
+            "global body",
+        );
         // Distinct global-only entry survives.
         write_prompt(&global_dir(home.path()), "lint.md", "lint", "global body");
 

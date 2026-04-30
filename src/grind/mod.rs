@@ -14,7 +14,9 @@ pub mod discovery;
 pub mod prompt;
 pub mod templates;
 
-pub use discovery::{discover_prompts, resolve_home_prompts_dir, DiscoveryOptions, DiscoveryResult};
+pub use discovery::{
+    discover_prompts, resolve_home_prompts_dir, DiscoveryOptions, DiscoveryResult,
+};
 pub use prompt::{
     parse_prompt_file, PromptDoc, PromptMeta, PromptMetaValidationError, PromptParseError,
     PromptSource,

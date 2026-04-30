@@ -166,16 +166,9 @@ impl PartialEq for PromptParseError {
             (Io { path: a, .. }, Io { path: b, .. }) => a == b,
             (MissingFrontmatter { path: a }, MissingFrontmatter { path: b }) => a == b,
             (MissingName { path: a }, MissingName { path: b }) => a == b,
-            (
-                DuplicateField {
-                    path: a,
-                    field: af,
-                },
-                DuplicateField {
-                    path: b,
-                    field: bf,
-                },
-            ) => a == b && af == bf,
+            (DuplicateField { path: a, field: af }, DuplicateField { path: b, field: bf }) => {
+                a == b && af == bf
+            }
             (
                 BadFrontmatter {
                     path: a,
@@ -261,11 +254,11 @@ pub(crate) fn parse_prompt_str(
         input
     };
 
-    let after_open = text
-        .strip_prefix(FENCE)
-        .ok_or_else(|| PromptParseError::MissingFrontmatter {
-            path: display.clone(),
-        })?;
+    let after_open =
+        text.strip_prefix(FENCE)
+            .ok_or_else(|| PromptParseError::MissingFrontmatter {
+                path: display.clone(),
+            })?;
     let close_idx =
         find_closing_fence(after_open).ok_or_else(|| PromptParseError::MissingFrontmatter {
             path: display.clone(),

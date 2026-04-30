@@ -19,8 +19,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 
 use crate::grind::{
-    discover_prompts, resolve_home_prompts_dir, templates, DiscoveryOptions, DiscoveryResult,
-    PromptDoc, PromptSource,
+    discover_prompts, resolve_home_prompts_dir, templates, DiscoveryOptions, PromptDoc,
+    PromptSource,
 };
 use crate::style::{self, col};
 use crate::util::write_atomic;
@@ -62,7 +62,9 @@ pub fn run(workspace: PathBuf, args: PromptsArgs) -> Result<()> {
     match args.action {
         PromptsAction::Ls => run_ls(&workspace),
         PromptsAction::Validate => run_validate(&workspace),
-        PromptsAction::New { name, dir, global } => run_new(&workspace, &name, dir.as_deref(), global),
+        PromptsAction::New { name, dir, global } => {
+            run_new(&workspace, &name, dir.as_deref(), global)
+        }
     }
 }
 
@@ -104,11 +106,7 @@ fn run_validate(workspace: &Path) -> Result<()> {
     let err_count = result.errors.len();
     {
         let mut out = stdout.lock();
-        let _ = writeln!(
-            out,
-            "{} prompt(s) ok, {} error(s)",
-            ok_count, err_count
-        );
+        let _ = writeln!(out, "{} prompt(s) ok, {} error(s)", ok_count, err_count);
     }
 
     if err_count > 0 {
@@ -117,16 +115,9 @@ fn run_validate(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_new(
-    workspace: &Path,
-    name: &str,
-    dir_override: Option<&Path>,
-    global: bool,
-) -> Result<()> {
+fn run_new(workspace: &Path, name: &str, dir_override: Option<&Path>, global: bool) -> Result<()> {
     if !is_valid_prompt_name(name) {
-        bail!(
-            "prompts new: invalid name {name:?}: must match ^[a-z0-9][a-z0-9_-]*$"
-        );
+        bail!("prompts new: invalid name {name:?}: must match ^[a-z0-9][a-z0-9_-]*$");
     }
 
     let target_dir = resolve_target_dir(workspace, dir_override, global)?;
@@ -276,20 +267,20 @@ fn display_relative(workspace: &Path, target: &Path) -> String {
         .unwrap_or_else(|_| target.display().to_string())
 }
 
-/// Pure variant of `validate` for use by tests: returns `(ok_count, errors)`
-/// instead of writing to stdout/stderr or calling `exit`.
-#[cfg(test)]
-pub(crate) fn validate_collect(workspace: &Path) -> DiscoveryResult {
-    discover_prompts(default_options(workspace))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::grind::{PromptMeta, PromptSource};
     use std::path::PathBuf;
 
-    fn doc(name: &str, source: PromptSource, weight: u32, every: u32, verify: bool, path: &str) -> PromptDoc {
+    fn doc(
+        name: &str,
+        source: PromptSource,
+        weight: u32,
+        every: u32,
+        verify: bool,
+        path: &str,
+    ) -> PromptDoc {
         PromptDoc {
             meta: PromptMeta {
                 name: name.to_string(),
@@ -313,7 +304,14 @@ mod tests {
     fn render_table_aligns_columns() {
         let prompts = vec![
             doc("alpha", PromptSource::Project, 1, 1, false, "/p/alpha.md"),
-            doc("triage-much-longer-name", PromptSource::Global, 5, 3, true, "/g/triage-much-longer-name.md"),
+            doc(
+                "triage-much-longer-name",
+                PromptSource::Global,
+                5,
+                3,
+                true,
+                "/g/triage-much-longer-name.md",
+            ),
         ];
         let table = render_table(&prompts, false);
         let lines: Vec<&str> = table.lines().collect();

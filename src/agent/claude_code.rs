@@ -784,8 +784,9 @@ mod tests {
             "explicit override must win: {args:?}"
         );
         assert!(
-            !args.windows(2).any(|w| w[0] == "--permission-mode"
-                && (w[1] == "auto" || w[1] == "acceptEdits")),
+            !args
+                .windows(2)
+                .any(|w| w[0] == "--permission-mode" && (w[1] == "auto" || w[1] == "acceptEdits")),
             "per-model default must not also appear: {args:?}"
         );
     }
