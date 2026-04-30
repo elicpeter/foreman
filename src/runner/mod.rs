@@ -10,9 +10,11 @@
 //! Phase 13 layers a bounded fixer loop on top: when the project tests fail,
 //! the runner dispatches the fixer agent up to
 //! [`crate::config::RetryBudgets::fixer_max_attempts`] times, re-running tests
-//! after each attempt, before halting. Auditor (phase 14) drops in next by
-//! extending the post-tests block; the event channel and state shape are
-//! forward-compatible with both.
+//! after each attempt, before halting. Phase 14 inserts the auditor pass
+//! between the (passing) test run and the per-phase commit: when
+//! [`crate::config::AuditConfig::enabled`] is on the runner stages the
+//! implementer's diff, hands it to the auditor agent, re-validates the
+//! planning artifacts, and re-runs the tests before letting the commit land.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -106,6 +108,23 @@ pub enum Event {
         /// Total agent-dispatch counter at this phase (mirrors
         /// [`crate::state::RunState::attempts`]).
         attempt: u32,
+    },
+    /// The runner dispatched the auditor agent after the test suite passed.
+    /// Fires at most once per phase and only when
+    /// [`crate::config::AuditConfig::enabled`] is `true` and the implementer /
+    /// fixer dispatches produced staged code changes.
+    AuditorStarted {
+        /// Phase the auditor is operating on.
+        phase_id: PhaseId,
+        /// Total agent-dispatch counter at this phase (mirrors
+        /// [`crate::state::RunState::attempts`]).
+        attempt: u32,
+    },
+    /// The auditor dispatched without finding code changes worth auditing
+    /// (the index was empty after staging excluded paths).
+    AuditorSkippedNoChanges {
+        /// Phase whose audit was skipped.
+        phase_id: PhaseId,
     },
     /// One line of agent stdout.
     AgentStdout(String),
@@ -332,13 +351,13 @@ impl<A: Agent, G: Git> Runner<A, G> {
             &self.workspace,
             self.config.tests.command.as_deref(),
         );
-        if let Some(runner) = test_runner {
+        if let Some(runner) = &test_runner {
             let outcome = self
-                .run_tests(&runner, &phase_id, "tests", attempt)
+                .run_tests(runner, &phase_id, "tests", attempt)
                 .await?;
             if !outcome.passed {
                 match self
-                    .run_fixer_loop(&phase, &runner, &plan_path, &deferred_path, outcome.summary)
+                    .run_fixer_loop(&phase, runner, &plan_path, &deferred_path, outcome.summary)
                     .await?
                 {
                     FixerLoopResult::Passed => {}
@@ -355,6 +374,26 @@ impl<A: Agent, G: Git> Runner<A, G> {
         let plan_rel = Path::new("plan.md");
         let deferred_rel = Path::new("deferred.md");
         let foreman_rel = Path::new(".foreman");
+
+        match self
+            .run_auditor_pass(
+                &phase,
+                test_runner.as_ref(),
+                &plan_path,
+                &deferred_path,
+                &[plan_rel, deferred_rel, foreman_rel],
+            )
+            .await?
+        {
+            AuditPassResult::Continue => {}
+            AuditPassResult::Halted(reason) => {
+                return Ok(PhaseResult::Halted { phase_id, reason })
+            }
+        }
+
+        // Re-stage to capture anything the auditor added or modified. When the
+        // auditor was skipped (disabled, or no code changes to audit) this is
+        // the first stage call of the phase.
         self.git
             .stage_changes(&[plan_rel, deferred_rel, foreman_rel])
             .await
@@ -611,6 +650,101 @@ impl<A: Agent, G: Git> Runner<A, G> {
         )))
     }
 
+    /// Run the auditor agent, gated on
+    /// [`crate::config::AuditConfig::enabled`].
+    ///
+    /// Slots in after the test suite (and any fixer dispatches) passes and
+    /// before the per-phase commit. The runner stages the implementer's code
+    /// changes so it can hand the resulting `git diff --cached` to the auditor
+    /// as input; if the staged diff is empty (e.g. the implementer only edited
+    /// planning artifacts) the audit is skipped. The auditor may inline small
+    /// fixes or extend `deferred.md`; either way the post-dispatch validation
+    /// re-parses `deferred.md` and re-runs the project tests since the auditor
+    /// may have edited code. A test failure post-audit halts the phase rather
+    /// than re-entering the fixer loop — auditor edits are scoped enough that
+    /// breaking the build deserves operator attention.
+    async fn run_auditor_pass(
+        &mut self,
+        phase: &crate::plan::Phase,
+        test_runner: Option<&project_tests::TestRunner>,
+        plan_path: &Path,
+        deferred_path: &Path,
+        exclude: &[&Path],
+    ) -> Result<AuditPassResult> {
+        if !self.config.audit.enabled {
+            return Ok(AuditPassResult::Continue);
+        }
+
+        let phase_id = phase.id.clone();
+
+        // Stage so we can sample the diff. `stage_changes` is idempotent so
+        // calling it again post-audit picks up anything the auditor adds.
+        self.git
+            .stage_changes(exclude)
+            .await
+            .context("runner: staging for audit diff")?;
+        let diff = self
+            .git
+            .staged_diff()
+            .await
+            .context("runner: capturing staged diff for auditor")?;
+
+        if diff.trim().is_empty() {
+            let _ = self.events_tx.send(Event::AuditorSkippedNoChanges {
+                phase_id: phase_id.clone(),
+            });
+            return Ok(AuditPassResult::Continue);
+        }
+
+        let total_attempt = self.bump_attempts(&phase_id);
+        let _ = self.events_tx.send(Event::AuditorStarted {
+            phase_id: phase_id.clone(),
+            attempt: total_attempt,
+        });
+
+        let user_prompt = prompts::auditor_with_deferred(
+            &self.plan,
+            phase,
+            &diff,
+            &self.deferred,
+            self.config.audit.small_fix_line_limit,
+        );
+        // Auditor only ever runs once per phase, so the per-role attempt
+        // counter in the log filename stays at 1; the global `attempt`
+        // counter still bumps so [`RunState::attempts`] reflects the spend.
+        let log_path = self.attempt_log_path(&phase_id, "audit", 1);
+        let request = AgentRequest {
+            role: Role::Auditor,
+            model: self.config.models.auditor.clone(),
+            system_prompt: String::new(),
+            user_prompt,
+            workdir: self.workspace.clone(),
+            log_path,
+            timeout: DEFAULT_AGENT_TIMEOUT,
+        };
+
+        match self
+            .dispatch_and_validate(request, Role::Auditor, plan_path, deferred_path)
+            .await?
+        {
+            ValidationResult::Continue => {}
+            ValidationResult::Halt(reason) => return Ok(AuditPassResult::Halted(reason)),
+        }
+
+        if let Some(test_runner) = test_runner {
+            let outcome = self
+                .run_tests(test_runner, &phase_id, "tests", total_attempt)
+                .await?;
+            if !outcome.passed {
+                return Ok(AuditPassResult::Halted(HaltReason::TestsFailed(
+                    outcome.summary,
+                )));
+            }
+        }
+
+        Ok(AuditPassResult::Continue)
+    }
+
     fn fold_token_usage(&mut self, role: Role, dispatch: &AgentDispatch) {
         let tokens = &dispatch.outcome_tokens;
         self.state.token_usage.input += tokens.input;
@@ -706,6 +840,15 @@ enum FixerLoopResult {
     Halted(HaltReason),
 }
 
+/// Outcome of [`Runner::run_auditor_pass`]. `Continue` covers all the keep-
+/// going cases (audit disabled, no diff to audit, audit ran and tests still
+/// pass); `Halted` carries an agent-side failure, a planning-artifact tamper,
+/// or post-audit test breakage.
+enum AuditPassResult {
+    Continue,
+    Halted(HaltReason),
+}
+
 async fn forward_agent_events(
     mut rx: mpsc::Receiver<AgentEvent>,
     tx: broadcast::Sender<Event>,
@@ -786,6 +929,18 @@ fn log_event_line(event: &Event) {
                 phase_id = phase_id,
                 fixer_attempt = fixer_attempt,
                 attempt = attempt,
+            );
+        }
+        Event::AuditorStarted { phase_id, attempt } => {
+            eprintln!(
+                "[foreman] phase {phase_id} auditor (total dispatch {attempt})",
+                phase_id = phase_id,
+                attempt = attempt,
+            );
+        }
+        Event::AuditorSkippedNoChanges { phase_id } => {
+            eprintln!(
+                "[foreman] phase {phase_id} auditor skipped: no code changes to audit"
             );
         }
         Event::AgentStdout(line) => eprintln!("[agent] {line}"),

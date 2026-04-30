@@ -128,6 +128,14 @@ pub trait Git: Send + Sync {
     /// Summary of `git diff --shortstat <from>..<to>`. An empty range
     /// resolves to [`DiffStat::default`].
     async fn diff_stat(&self, from: &str, to: &str) -> Result<DiffStat>;
+
+    /// Unified diff of the index against `HEAD`, as produced by
+    /// `git diff --cached`. The runner uses this to feed the auditor agent the
+    /// changes the implementer (and any fixer attempts) just produced before
+    /// they're committed; staging excluded paths via [`Git::stage_changes`]
+    /// keeps planning artifacts out of the diff. An empty index produces an
+    /// empty string.
+    async fn staged_diff(&self) -> Result<String>;
 }
 
 /// Build a per-run branch name from a prefix and a UTC timestamp.

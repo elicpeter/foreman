@@ -38,6 +38,8 @@ pub enum MockOp {
     Commit(String),
     /// `diff_stat(from, to)` was called.
     DiffStat(String, String),
+    /// `staged_diff` was called.
+    StagedDiff,
 }
 
 /// Record of a single commit in [`MockGit`]'s in-memory log.
@@ -62,6 +64,10 @@ struct MockState {
     commits: Vec<MockCommit>,
     ops: Vec<MockOp>,
     next_commit_seq: u64,
+    /// Synthetic `git diff --cached` output. Tests set this to feed the runner
+    /// auditor a representative diff; the mock has no real index/working tree
+    /// to compute one from.
+    staged_diff: String,
 }
 
 impl MockState {
@@ -76,6 +82,7 @@ impl MockState {
             commits: Vec::new(),
             ops: Vec::new(),
             next_commit_seq: 0,
+            staged_diff: String::new(),
         }
     }
 }
@@ -123,6 +130,13 @@ impl MockGit {
     /// Snapshot of the operation journal in call order.
     pub fn ops(&self) -> Vec<MockOp> {
         self.state.lock().unwrap().ops.clone()
+    }
+
+    /// Set the canned `git diff --cached` output the next [`Git::staged_diff`]
+    /// call returns. Tests use this to drive the runner's audit branch with a
+    /// representative diff string.
+    pub fn set_staged_diff(&self, diff: impl Into<String>) {
+        self.state.lock().unwrap().staged_diff = diff.into();
     }
 
     /// Most recent exclusion set passed to `stage_changes`, or `None` if it
@@ -229,6 +243,12 @@ impl Git for MockGit {
         s.ops
             .push(MockOp::DiffStat(from.to_string(), to.to_string()));
         Ok(DiffStat::default())
+    }
+
+    async fn staged_diff(&self) -> Result<String> {
+        let mut s = self.state.lock().unwrap();
+        s.ops.push(MockOp::StagedDiff);
+        Ok(s.staged_diff.clone())
     }
 }
 
@@ -359,6 +379,21 @@ mod tests {
         let git = MockGit::new();
         let stat = git.diff_stat("x", "y").await.unwrap();
         assert_eq!(stat, DiffStat::default());
+    }
+
+    #[tokio::test]
+    async fn staged_diff_returns_canned_text_and_records_op() {
+        let git = MockGit::new();
+        assert_eq!(git.staged_diff().await.unwrap(), "");
+        git.set_staged_diff("diff --git a/foo b/foo\n+new line\n");
+        let diff = git.staged_diff().await.unwrap();
+        assert!(diff.contains("+new line"));
+        let ops = git.ops();
+        assert_eq!(
+            ops,
+            vec![MockOp::StagedDiff, MockOp::StagedDiff],
+            "ops: {ops:?}"
+        );
     }
 
     #[test]

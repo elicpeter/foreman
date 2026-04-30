@@ -194,6 +194,15 @@ fn git_log_oneline(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// `Config::default()` with the auditor pass disabled. Most tests below
+/// exercise the phase 12 / 13 flow (implementer → tests → fixer → commit) and
+/// don't want the phase 14 auditor consuming scripts off the agent queue.
+fn audit_disabled() -> Config {
+    let mut c = Config::default();
+    c.audit.enabled = false;
+    c
+}
+
 async fn build_runner(
     workspace: &Path,
     plan_text: &str,
@@ -238,7 +247,7 @@ async fn run_advances_through_three_phase_plan() {
     ]);
 
     let (mut runner, _branch_git) =
-        build_runner(dir.path(), THREE_PHASE_PLAN, EMPTY_DEFERRED, Config::default(), agent).await;
+        build_runner(dir.path(), THREE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
 
     let summary = runner.run().await.unwrap();
     assert!(matches!(summary, RunSummary::Finished), "summary: {summary:?}");
@@ -283,7 +292,7 @@ async fn halts_on_plan_tamper_and_restores_snapshot() {
     let bogus_plan = "---\ncurrent_phase: \"99\"\n---\n\n# Phase 99: bogus\n";
     let agent = ScriptedAgent::new(vec![Script::default().write("plan.md", bogus_plan.as_bytes())]);
     let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, Config::default(), agent).await;
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -315,7 +324,7 @@ async fn halts_on_invalid_deferred_and_restores() {
     let bad_deferred = "## Garbage\n\n- not valid\n";
     let agent = ScriptedAgent::new(vec![Script::default().write("deferred.md", bad_deferred.as_bytes())]);
     let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, Config::default(), agent).await;
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -341,7 +350,7 @@ async fn halts_on_test_failure_with_no_fixer() {
     let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
     init_git_repo(dir.path());
 
-    let mut config = Config::default();
+    let mut config = audit_disabled();
     config.tests.command = Some("/bin/sh -c false".to_string());
     // Explicitly disable the fixer for this test — we want the bare phase-12
     // "implementer fails the suite" path, not the fixer loop.
@@ -380,7 +389,7 @@ async fn advances_with_no_commit_when_only_deferred_changed() {
     let new_deferred = "## Deferred items\n\n- [ ] open item from agent\n\n## Deferred phases\n";
     let agent = ScriptedAgent::new(vec![Script::default().write("deferred.md", new_deferred.as_bytes())]);
     let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, Config::default(), agent).await;
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
 
     let summary = runner.run().await.unwrap();
     assert!(matches!(summary, RunSummary::Finished));
@@ -416,7 +425,7 @@ async fn mixed_changes_with_plan_tamper_halts_before_commit() {
         .write("src/foo.rs", b"// real change\n")
         .write("plan.md", bogus_plan.as_bytes())]);
     let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, Config::default(), agent).await;
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -448,7 +457,7 @@ async fn agent_failure_halts_with_agent_failure_reason() {
         ..Script::default()
     }]);
     let (mut runner, _g) =
-        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, Config::default(), agent).await;
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
 
     let summary = runner.run().await.unwrap();
     match summary {
@@ -474,7 +483,7 @@ async fn fixer_succeeds_on_attempt_2_and_phase_commits() {
     init_git_repo(dir.path());
     fs::write(dir.path().join(".test.sh"), PASS_MARKER_TEST_SCRIPT).unwrap();
 
-    let mut config = Config::default();
+    let mut config = audit_disabled();
     config.tests.command = Some("/bin/sh ./.test.sh".to_string());
     config.retries.fixer_max_attempts = 2;
 
@@ -549,7 +558,7 @@ async fn fixer_exhausts_retries_then_halts_with_tests_failed() {
     init_git_repo(dir.path());
     fs::write(dir.path().join(".test.sh"), PASS_MARKER_TEST_SCRIPT).unwrap();
 
-    let mut config = Config::default();
+    let mut config = audit_disabled();
     config.tests.command = Some("/bin/sh ./.test.sh".to_string());
     config.retries.fixer_max_attempts = 2;
 
@@ -611,7 +620,7 @@ async fn fixer_emits_fixer_started_events_with_increasing_attempt() {
     init_git_repo(dir.path());
     fs::write(dir.path().join(".test.sh"), PASS_MARKER_TEST_SCRIPT).unwrap();
 
-    let mut config = Config::default();
+    let mut config = audit_disabled();
     config.tests.command = Some("/bin/sh ./.test.sh".to_string());
     config.retries.fixer_max_attempts = 2;
 
@@ -655,4 +664,273 @@ async fn fixer_emits_fixer_started_events_with_increasing_attempt() {
         vec![2, 3],
         "total attempt counter should be 2 then 3 (after impl=1)"
     );
+}
+
+/// Audit-enabled small-fix path: implementer writes code, auditor inlines a
+/// small extra source file, both land in a single per-phase commit.
+#[tokio::test]
+async fn auditor_inlines_small_fix_and_commits_combined_diff() {
+    let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
+    init_git_repo(dir.path());
+
+    // audit defaults (enabled = true) but no test runner override → tests skipped.
+    let config = Config::default();
+
+    let agent = ScriptedAgent::new(vec![
+        // Implementer.
+        Script::default().write("src/lib.rs", b"// implementer\n"),
+        // Auditor: small inline fix.
+        Script::default().write("src/audit_extra.rs", b"// audit fix\n"),
+    ]);
+
+    let (mut runner, _g) =
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, config, agent).await;
+
+    let summary = runner.run().await.unwrap();
+    assert!(
+        matches!(summary, RunSummary::Finished),
+        "expected finish, got {summary:?}"
+    );
+
+    // Both files exist on disk.
+    assert!(dir.path().join("src/lib.rs").exists());
+    assert!(dir.path().join("src/audit_extra.rs").exists());
+
+    // Single phase commit landed (implementer + auditor edits combined).
+    let log = git_log_oneline(dir.path());
+    let phase_commits: Vec<&String> = log
+        .iter()
+        .filter(|l| l.contains("[foreman] phase"))
+        .collect();
+    assert_eq!(
+        phase_commits.len(),
+        1,
+        "expected one combined commit; got log:\n{log:?}"
+    );
+
+    // Audit log written under the conventional path.
+    assert!(
+        dir.path().join(".foreman/logs/phase-01-audit-1.log").exists(),
+        "phase-01-audit-1.log must exist after the auditor pass"
+    );
+
+    // attempts counter == 2 (1 implementer + 1 auditor).
+    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    assert_eq!(
+        state.attempts.get(&pid("01")).copied(),
+        Some(2),
+        "attempts should reflect 1 implementer + 1 auditor dispatch"
+    );
+
+    // The committed tree contains both files.
+    let staged = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(dir.path())
+        .args(["show", "--name-only", "--format=", "HEAD"])
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    assert!(staged.contains("src/lib.rs"), "show: {staged}");
+    assert!(staged.contains("src/audit_extra.rs"), "show: {staged}");
+}
+
+/// Audit-enabled defer path: implementer writes code, auditor only appends to
+/// `deferred.md`. The runner commits the implementer's code and the deferred
+/// item survives the post-commit sweep (it's unchecked).
+#[tokio::test]
+async fn auditor_defers_large_finding_to_deferred_md() {
+    let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
+    init_git_repo(dir.path());
+
+    let config = Config::default();
+
+    let auditor_deferred = "## Deferred items\n\n- [ ] auditor: refactor the foo module\n\n## Deferred phases\n";
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("src/lib.rs", b"// implementer\n"),
+        // Auditor only appends to deferred.md; no code changes.
+        Script::default().write("deferred.md", auditor_deferred.as_bytes()),
+    ]);
+
+    let (mut runner, _g) =
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, config, agent).await;
+
+    let summary = runner.run().await.unwrap();
+    assert!(matches!(summary, RunSummary::Finished));
+
+    // One commit lands — the implementer's src/lib.rs.
+    let log = git_log_oneline(dir.path());
+    let phase_commits: Vec<&String> = log
+        .iter()
+        .filter(|l| l.contains("[foreman] phase"))
+        .collect();
+    assert_eq!(phase_commits.len(), 1, "log:\n{log:?}");
+
+    // Auditor's deferred item survived the sweep (it's unchecked).
+    let deferred_after = fs::read_to_string(dir.path().join("deferred.md")).unwrap();
+    assert!(
+        deferred_after.contains("auditor: refactor the foo module"),
+        "deferred.md after run:\n{deferred_after}"
+    );
+}
+
+/// Audit-enabled path on a phase that produced no code changes (only
+/// `deferred.md` was touched by the implementer): the auditor must be skipped
+/// because there's no diff to audit, and the run advances without a commit.
+#[tokio::test]
+async fn auditor_skipped_when_implementer_only_touched_planning_artifacts() {
+    use foreman::runner::Event;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
+    init_git_repo(dir.path());
+
+    let new_deferred = "## Deferred items\n\n- [ ] open item\n\n## Deferred phases\n";
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("deferred.md", new_deferred.as_bytes()),
+    ]);
+
+    let (mut runner, _g) = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        EMPTY_DEFERRED,
+        Config::default(),
+        agent,
+    )
+    .await;
+
+    let mut rx = runner.subscribe();
+    let collector = tokio::spawn(async move {
+        let mut saw_skipped = false;
+        let mut saw_started = false;
+        loop {
+            match rx.recv().await {
+                Ok(Event::AuditorSkippedNoChanges { .. }) => saw_skipped = true,
+                Ok(Event::AuditorStarted { .. }) => saw_started = true,
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
+        }
+        (saw_skipped, saw_started)
+    });
+
+    let summary = runner.run().await.unwrap();
+    assert!(matches!(summary, RunSummary::Finished));
+
+    drop(runner);
+    let (saw_skipped, saw_started) = collector.await.unwrap();
+    assert!(saw_skipped, "expected AuditorSkippedNoChanges event");
+    assert!(
+        !saw_started,
+        "auditor must not dispatch when there is no staged diff"
+    );
+
+    // No commit (only excluded paths changed).
+    let log = git_log_oneline(dir.path());
+    assert!(log.iter().all(|l| !l.contains("[foreman] phase")));
+
+    // attempts counter stays at 1 (just the implementer).
+    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    assert_eq!(state.attempts.get(&pid("01")).copied(), Some(1));
+}
+
+/// Auditor breaks the test suite → halt with TestsFailed. The phase must NOT
+/// be marked completed and no commit lands.
+#[tokio::test]
+async fn auditor_test_failure_halts_phase() {
+    let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
+    init_git_repo(dir.path());
+    fs::write(dir.path().join(".test.sh"), PASS_MARKER_TEST_SCRIPT).unwrap();
+
+    let mut config = Config::default();
+    config.tests.command = Some("/bin/sh ./.test.sh".to_string());
+    // Disable the fixer so the implementer must produce a passing suite on its
+    // own; this keeps the test focused on the post-audit re-run.
+    config.retries.fixer_max_attempts = 0;
+
+    let agent = ScriptedAgent::new(vec![
+        // Implementer: writes the marker → tests pass.
+        Script::default()
+            .write("src/lib.rs", b"// implementer\n")
+            .write(".pass-marker", b""),
+        // Auditor edit that breaks the suite: rewrite the test script so it
+        // always exits non-zero. Models the case where an audit-time fix has
+        // an unintended side effect.
+        Script::default().write(".test.sh", "#!/bin/sh\nfalse\n"),
+    ]);
+
+    let (mut runner, _g) =
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, config, agent).await;
+
+    let summary = runner.run().await.unwrap();
+    match summary {
+        RunSummary::Halted { phase_id, reason } => {
+            assert_eq!(phase_id.as_str(), "01");
+            assert!(
+                matches!(reason, HaltReason::TestsFailed(_)),
+                "expected TestsFailed after audit broke tests, got {reason:?}"
+            );
+        }
+        other => panic!("expected halt, got {other:?}"),
+    }
+
+    // Phase not marked completed.
+    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    assert!(state.completed.is_empty());
+    // attempts counter == 2 (implementer + auditor).
+    assert_eq!(state.attempts.get(&pid("01")).copied(), Some(2));
+
+    // No phase commit landed.
+    let log = git_log_oneline(dir.path());
+    assert!(
+        log.iter().all(|l| !l.contains("[foreman] phase")),
+        "no phase commit expected after auditor broke tests; log:\n{log:?}"
+    );
+}
+
+/// Audit-disabled path is unchanged from phase 13 behavior: implementer-only
+/// flow with no auditor dispatch and no AuditorStarted event.
+#[tokio::test]
+async fn audit_disabled_path_skips_auditor_entirely() {
+    use foreman::runner::Event;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
+    init_git_repo(dir.path());
+
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("src/lib.rs", b"// implementer\n"),
+    ]);
+
+    let (mut runner, _g) =
+        build_runner(dir.path(), ONE_PHASE_PLAN, EMPTY_DEFERRED, audit_disabled(), agent).await;
+
+    let mut rx = runner.subscribe();
+    let collector = tokio::spawn(async move {
+        let mut saw_audit_event = false;
+        loop {
+            match rx.recv().await {
+                Ok(Event::AuditorStarted { .. })
+                | Ok(Event::AuditorSkippedNoChanges { .. }) => saw_audit_event = true,
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
+        }
+        saw_audit_event
+    });
+
+    let summary = runner.run().await.unwrap();
+    assert!(matches!(summary, RunSummary::Finished));
+
+    drop(runner);
+    let saw_audit_event = collector.await.unwrap();
+    assert!(
+        !saw_audit_event,
+        "no AuditorStarted / AuditorSkippedNoChanges events when audit is disabled"
+    );
+
+    // attempts counter == 1 (implementer only).
+    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    assert_eq!(state.attempts.get(&pid("01")).copied(), Some(1));
 }

@@ -188,6 +188,11 @@ impl Git for ShellGit {
             .await?;
         Ok(parse_shortstat(&out.stdout))
     }
+
+    async fn staged_diff(&self) -> Result<String> {
+        let out = self.run_succeed("staged_diff", &["diff", "--cached"]).await?;
+        Ok(out.stdout)
+    }
 }
 
 /// Parse `git diff --shortstat` output. Examples:
@@ -446,6 +451,51 @@ mod tests {
         let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
         let stat = git.diff_stat(&head, &head).await.unwrap();
         assert_eq!(stat, DiffStat::default());
+    }
+
+    #[tokio::test]
+    async fn staged_diff_reflects_index_contents() {
+        let dir = fresh_repo().await;
+        let git = ShellGit::new(dir.path());
+
+        // No index → empty diff.
+        assert_eq!(git.staged_diff().await.unwrap().trim(), "");
+
+        // Stage a new file and an edit; both should show up in the diff.
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
+        git.stage_changes(&[]).await.unwrap();
+        let diff = git.staged_diff().await.unwrap();
+        assert!(diff.contains("src/foo.rs"), "diff: {diff}");
+        assert!(diff.contains("+fn main()"), "diff: {diff}");
+    }
+
+    #[tokio::test]
+    async fn staged_diff_excludes_paths_excluded_by_stage_changes() {
+        let dir = fresh_repo().await;
+        let git = ShellGit::new(dir.path());
+
+        // Mirror the runner's pre-audit setup: implementer touched both
+        // planning artifacts and code; only code should make it into the diff.
+        fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
+        fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
+        git.stage_changes(&[
+            Path::new("plan.md"),
+            Path::new("deferred.md"),
+            Path::new(".foreman"),
+        ])
+        .await
+        .unwrap();
+
+        let diff = git.staged_diff().await.unwrap();
+        assert!(diff.contains("src/foo.rs"), "diff: {diff}");
+        assert!(!diff.contains("plan.md"), "diff leaked plan.md: {diff}");
+        assert!(
+            !diff.contains("deferred.md"),
+            "diff leaked deferred.md: {diff}"
+        );
     }
 
     #[test]
