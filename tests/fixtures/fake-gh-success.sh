@@ -14,6 +14,6 @@ set -eu
 } >".gh-fake-log"
 
 # `gh pr create` prints any preamble first then the URL on its own line.
-echo "Creating pull request for foreman/run-x into main"
+echo "Creating pull request for pitboss/run-x into main"
 echo "https://github.com/example/repo/pull/42"
 exit 0

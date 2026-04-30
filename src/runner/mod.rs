@@ -254,7 +254,7 @@ pub struct Runner<A: Agent, G: Git> {
     git: G,
     events_tx: broadcast::Sender<Event>,
     /// When `true`, [`Runner::run_phase`] skips test detection and execution.
-    /// Set by `foreman run --dry-run`, which dispatches the no-op
+    /// Set by `pitboss run --dry-run`, which dispatches the no-op
     /// [`crate::agent::dry_run::DryRunAgent`]: since the agent never modifies
     /// the working tree, running tests would only re-confirm whatever the
     /// pre-run state was and risk halting the dry-run on a flaky suite.
@@ -291,7 +291,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
     }
 
     /// Skip the per-phase test invocation entirely. Used by
-    /// `foreman run --dry-run` so a no-op agent does not get halted by a
+    /// `pitboss run --dry-run` so a no-op agent does not get halted by a
     /// pre-existing red test suite. The runner emits [`Event::TestsSkipped`]
     /// in place of [`Event::TestStarted`] / [`Event::TestFinished`] so
     /// subscribers (logger, TUI) still get a clear signal that tests were
@@ -367,9 +367,9 @@ impl<A: Agent, G: Git> Runner<A, G> {
 
     /// Execute the current phase to completion (success or halt).
     ///
-    /// Persists [`RunState`] to `.foreman/state.json` on every exit — including
+    /// Persists [`RunState`] to `.pitboss/state.json` on every exit — including
     /// halts — so the attempts counter and accumulated token usage survive a
-    /// halted phase and a subsequent `foreman run` invocation can pick them up.
+    /// halted phase and a subsequent `pitboss run` invocation can pick them up.
     pub async fn run_phase(&mut self) -> Result<PhaseResult> {
         let result = self.run_phase_inner().await;
         if let Err(e) = state::save(&self.workspace, Some(&self.state)) {
@@ -453,7 +453,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
 
         let plan_rel = Path::new("plan.md");
         let deferred_rel = Path::new("deferred.md");
-        let foreman_rel = Path::new(".foreman");
+        let pitboss_rel = Path::new(".pitboss");
 
         match self
             .run_auditor_pass(
@@ -461,7 +461,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 test_runner.as_ref(),
                 &plan_path,
                 &deferred_path,
-                &[plan_rel, deferred_rel, foreman_rel],
+                &[plan_rel, deferred_rel, pitboss_rel],
             )
             .await?
         {
@@ -473,7 +473,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
         // auditor was skipped (disabled, or no code changes to audit) this is
         // the first stage call of the phase.
         self.git
-            .stage_changes(&[plan_rel, deferred_rel, foreman_rel])
+            .stage_changes(&[plan_rel, deferred_rel, pitboss_rel])
             .await
             .context("runner: staging code-only changes")?;
 
@@ -568,7 +568,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
 
     fn attempt_log_path(&self, phase_id: &PhaseId, role: &str, attempt: u32) -> PathBuf {
         self.workspace
-            .join(".foreman")
+            .join(".pitboss")
             .join("logs")
             .join(format!("phase-{}-{}-{}.log", phase_id, role, attempt))
     }
@@ -1013,7 +1013,7 @@ pub async fn log_events(mut rx: broadcast::Receiver<Event>) {
             }
             Err(RecvError::Closed) => return,
             Err(RecvError::Lagged(n)) => {
-                eprintln!("[foreman] (logger lagged: dropped {n} events)");
+                eprintln!("[pitboss] (logger lagged: dropped {n} events)");
             }
         }
     }
@@ -1023,7 +1023,7 @@ fn log_event_line(event: &Event) {
     use crate::style::{self, col};
     let c = style::use_color_stderr();
 
-    let fm = col(c, style::BOLD_CYAN, "[foreman]");
+    let fm = col(c, style::BOLD_CYAN, "[pitboss]");
 
     match event {
         Event::PhaseStarted {
@@ -1037,7 +1037,7 @@ fn log_event_line(event: &Event) {
             }
             eprintln!(
                 "{} {}",
-                col(c, style::BOLD_CYAN, "[foreman]"),
+                col(c, style::BOLD_CYAN, "[pitboss]"),
                 col(
                     c,
                     style::BOLD_WHITE,
@@ -1151,7 +1151,7 @@ fn log_event_line(event: &Event) {
         Event::PhaseHalted { phase_id, reason } => {
             eprintln!(
                 "{} {}",
-                col(c, style::BOLD_RED, "[foreman]"),
+                col(c, style::BOLD_RED, "[pitboss]"),
                 col(
                     c,
                     style::BOLD_RED,
@@ -1164,7 +1164,7 @@ fn log_event_line(event: &Event) {
             if c {
                 eprintln!("{rule}");
             }
-            eprintln!("{}", col(c, style::BOLD_GREEN, "[foreman] run finished"));
+            eprintln!("{}", col(c, style::BOLD_GREEN, "[pitboss] run finished"));
             if c {
                 eprintln!("{rule}");
             }
@@ -1196,7 +1196,7 @@ mod tests {
             .with_timezone(&Utc);
         let state = fresh_run_state(&plan, &cfg, now);
         assert_eq!(state.run_id, "20260429T143022Z");
-        assert_eq!(state.branch, "foreman/run-20260429T143022Z");
+        assert_eq!(state.branch, "pitboss/run-20260429T143022Z");
         assert_eq!(state.started_phase, pid("01"));
         assert_eq!(state.started_at, now);
         assert!(state.completed.is_empty());

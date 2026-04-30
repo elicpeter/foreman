@@ -9,7 +9,7 @@
 //!   call and lets tests assert that the runner is passing the right exclusion
 //!   set on `stage_changes`.
 //!
-//! The trait surface is intentionally narrow: foreman never resolves merges,
+//! The trait surface is intentionally narrow: pitboss never resolves merges,
 //! talks to remotes, or rewrites history — it only lands per-phase commits
 //! onto a fresh per-run branch. Adding scope here later means adding methods,
 //! never reshaping the existing ones.
@@ -112,8 +112,8 @@ pub trait Git: Send + Sync {
     /// Stage every untracked or modified path **except** those in `exclude`.
     ///
     /// Each excluded path becomes a `:!<path>` git pathspec, applied by git
-    /// itself rather than by foreman walking the tree. The runner always
-    /// passes `plan.md`, `deferred.md`, and `.foreman` so per-phase commits
+    /// itself rather than by pitboss walking the tree. The runner always
+    /// passes `plan.md`, `deferred.md`, and `.pitboss` so per-phase commits
     /// stay scoped to code; the trait keeps the parameter generic so tests
     /// can verify that contract.
     async fn stage_changes(&self, exclude: &[&Path]) -> Result<()>;
@@ -143,7 +143,7 @@ pub trait Git: Send + Sync {
     ///
     /// Returns the URL `gh` prints on stdout (e.g.,
     /// `https://github.com/owner/repo/pull/42`). The branch must already be
-    /// pushed to a remote with `gh` configured for the repo; foreman does not
+    /// pushed to a remote with `gh` configured for the repo; pitboss does not
     /// push or create remotes itself. Implementations are expected to invoke
     /// `gh pr create` with `--fill-first`-equivalent metadata via `--title`
     /// and `--body` so the call is non-interactive.
@@ -152,17 +152,17 @@ pub trait Git: Send + Sync {
 
 /// Build a per-run branch name from a prefix and a UTC timestamp.
 ///
-/// The output is `<prefix>YYYYMMDDTHHMMSSZ`, so a prefix of `foreman/run-`
-/// yields `foreman/run-20260429T143022Z`. Format intentionally has no
+/// The output is `<prefix>YYYYMMDDTHHMMSSZ`, so a prefix of `pitboss/run-`
+/// yields `pitboss/run-20260429T143022Z`. Format intentionally has no
 /// separators inside the timestamp so the resulting branch is git-safe (no
 /// colons, no slashes beyond the prefix the user chose).
 pub fn branch_name(prefix: &str, at: DateTime<Utc>) -> String {
     format!("{}{}", prefix, at.format("%Y%m%dT%H%M%SZ"))
 }
 
-/// Build the per-phase commit subject. Format: `[foreman] phase <id>: <title>`.
+/// Build the per-phase commit subject. Format: `[pitboss] phase <id>: <title>`.
 pub fn commit_message(phase_id: &PhaseId, title: &str) -> String {
-    format!("[foreman] phase {}: {}", phase_id, title)
+    format!("[pitboss] phase {}: {}", phase_id, title)
 }
 
 #[cfg(test)]
@@ -179,8 +179,8 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            branch_name("foreman/run-", at),
-            "foreman/run-20260429T143022Z"
+            branch_name("pitboss/run-", at),
+            "pitboss/run-20260429T143022Z"
         );
         assert_eq!(branch_name("", at), "20260429T143022Z");
     }
@@ -189,11 +189,11 @@ mod tests {
     fn commit_message_uses_canonical_format() {
         assert_eq!(
             commit_message(&pid("02"), "Domain types"),
-            "[foreman] phase 02: Domain types"
+            "[pitboss] phase 02: Domain types"
         );
         assert_eq!(
             commit_message(&pid("10b"), "Followup"),
-            "[foreman] phase 10b: Followup"
+            "[pitboss] phase 10b: Followup"
         );
     }
 

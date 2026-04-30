@@ -22,14 +22,14 @@ use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use foreman::agent::{Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason};
-use foreman::cli::run::open_post_run_pr;
-use foreman::config::Config;
-use foreman::deferred::DeferredDoc;
-use foreman::git::{self, Git, MockGit, MockOp, PrSummary, ShellGit};
-use foreman::plan::{self, PhaseId};
-use foreman::runner::{self, RunSummary, Runner};
-use foreman::state::TokenUsage;
+use pitboss::agent::{Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason};
+use pitboss::cli::run::open_post_run_pr;
+use pitboss::config::Config;
+use pitboss::deferred::DeferredDoc;
+use pitboss::git::{self, Git, MockGit, MockOp, PrSummary, ShellGit};
+use pitboss::plan::{self, PhaseId};
+use pitboss::runner::{self, RunSummary, Runner};
+use pitboss::state::TokenUsage;
 
 fn pid(s: &str) -> PhaseId {
     PhaseId::parse(s).unwrap()
@@ -104,7 +104,7 @@ const ONE_PHASE_PLAN: &str = "\
 current_phase: \"01\"
 ---
 
-# Foreman Plan
+# Pitboss Plan
 
 # Phase 01: Foundation
 
@@ -117,8 +117,8 @@ fn make_workspace(plan_text: &str, deferred_text: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
     fs::write(dir.path().join("plan.md"), plan_text).unwrap();
     fs::write(dir.path().join("deferred.md"), deferred_text).unwrap();
-    fs::create_dir_all(dir.path().join(".foreman/snapshots")).unwrap();
-    fs::create_dir_all(dir.path().join(".foreman/logs")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/snapshots")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/logs")).unwrap();
     dir
 }
 
@@ -130,8 +130,8 @@ fn init_git_repo(dir: &Path) {
         .expect("git init");
     assert!(status.success());
     for (k, v) in [
-        ("user.name", "foreman-test"),
-        ("user.email", "foreman@test"),
+        ("user.name", "pitboss-test"),
+        ("user.email", "pitboss@test"),
     ] {
         Command::new("git")
             .args(["-C"])
@@ -173,7 +173,7 @@ async fn open_post_run_pr_with_shell_git_invokes_fake_gh_with_generated_title_an
     ]);
 
     let plan = plan::parse(ONE_PHASE_PLAN).unwrap();
-    let deferred = foreman::deferred::parse(EMPTY_DEFERRED).unwrap();
+    let deferred = pitboss::deferred::parse(EMPTY_DEFERRED).unwrap();
     let config = audit_disabled();
     let state = runner::fresh_run_state(&plan, &config, Utc::now());
 
@@ -211,7 +211,7 @@ async fn open_post_run_pr_with_shell_git_invokes_fake_gh_with_generated_title_an
     let log = fs::read_to_string(dir.path().join(".gh-fake-log")).unwrap();
     assert!(log.contains("--title"), "fake log: {log}");
     assert!(
-        log.contains("foreman: phase 01 — Foundation"),
+        log.contains("pitboss: phase 01 — Foundation"),
         "fake log: {log}"
     );
     assert!(log.contains("--body"), "fake log: {log}");

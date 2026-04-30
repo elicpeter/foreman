@@ -6,7 +6,7 @@ project: todo-cli
 # Todo CLI — Implementation Plan
 
 A tiny Rust binary that reads and writes a flat JSON file on disk and exposes
-`add`, `list`, `done`, and `rm` subcommands. Designed as a foreman dogfood
+`add`, `list`, `done`, and `rm` subcommands. Designed as a pitboss dogfood
 target: small enough to finish in a single run, large enough that the
 implementer / fixer / auditor loop has something real to chew on.
 

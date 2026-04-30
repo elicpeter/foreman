@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture the README screenshots: TUI dashboard, `foreman status`, halted run.
+"""Capture the README screenshots: TUI dashboard, `pitboss status`, halted run.
 
 Each scene is captured with `vhs` (charm.sh), then framed with a cyan
 gradient that anchors on the wordmark color (#06b6d4 cyan-500). Output
@@ -7,16 +7,16 @@ PNGs land in `assets/`.
 
 Pipeline per scene:
   1. set up whatever the scene needs
-     - tui / halt: a temp Rust crate that depends on `foreman` via path
+     - tui / halt: a temp Rust crate that depends on `pitboss` via path
        and renders a single ratatui frame from a deterministic App state,
        then sleeps long enough for vhs to screenshot it
-     - status: a temp foreman workspace (real `git init`, plan.md,
-       deferred.md, foreman.toml, .foreman/state.json, one phase 01
-       commit) so `foreman status` produces realistic output
+     - status: a temp pitboss workspace (real `git init`, plan.md,
+       deferred.md, pitboss.toml, .pitboss/state.json, one phase 01
+       commit) so `pitboss status` produces realistic output
   2. write a vhs tape, run vhs to produce a PNG
   3. wrap the PNG in the cyan gradient frame and save into assets/
 
-Re-run any time. Everything below /tmp/foreman-screenshots-* is torn
+Re-run any time. Everything below /tmp/pitboss-screenshots-* is torn
 down on exit (success or failure).
 
 Prerequisites: vhs, python3+Pillow, rust toolchain, git.
@@ -37,7 +37,7 @@ from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
-FOREMAN_BIN = ROOT / "target" / "release" / "foreman"
+PITBOSS_BIN = ROOT / "target" / "release" / "pitboss"
 
 # Frame geometry.
 PAD_L, PAD_T, PAD_R, PAD_B = 80, 50, 80, 50
@@ -126,13 +126,13 @@ def frame_png(src: Path, dst: Path) -> None:
 
 
 DEMO_CARGO_TOML = f"""[package]
-name = "foreman-screenshots-demo"
+name = "pitboss-screenshots-demo"
 version = "0.0.0"
 edition = "2021"
 publish = false
 
 [dependencies]
-foreman = {{ path = "{ROOT}" }}
+pitboss = {{ path = "{ROOT}" }}
 ratatui = "0.30"
 crossterm = "0.29"
 """
@@ -150,11 +150,11 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use foreman::git::CommitId;
-use foreman::plan::{Phase, PhaseId, Plan};
-use foreman::runner::{Event, HaltReason};
-use foreman::state::RunState;
-use foreman::tui::App;
+use pitboss::git::CommitId;
+use pitboss::plan::{Phase, PhaseId, Plan};
+use pitboss::runner::{Event, HaltReason};
+use pitboss::state::RunState;
+use pitboss::tui::App;
 
 fn pid(s: &str) -> PhaseId {
     PhaseId::parse(s).unwrap()
@@ -186,7 +186,7 @@ fn three_phase_plan() -> Plan {
 fn fresh_state() -> RunState {
     RunState::new(
         "20260430T120000Z",
-        "foreman/run-20260430T120000Z",
+        "pitboss/run-20260430T120000Z",
         pid("01"),
     )
 }
@@ -278,11 +278,11 @@ def build_demo_binary(workdir: Path) -> Path:
     (src / "main.rs").write_text(DEMO_MAIN_RS)
     log("building demo binary")
     run(["cargo", "build", "--release", "--quiet"], cwd=workdir)
-    return workdir / "target" / "release" / "foreman-screenshots-demo"
+    return workdir / "target" / "release" / "pitboss-screenshots-demo"
 
 
 # ---------------------------------------------------------------------------
-# Foreman status workspace
+# Pitboss status workspace
 # ---------------------------------------------------------------------------
 
 
@@ -300,7 +300,7 @@ Define PhaseId, Phase, Plan and their parser.
 
 # Phase 03: Plan parser
 
-Wire the parser into `foreman init` and `foreman run`.
+Wire the parser into `pitboss init` and `pitboss run`.
 """
 
 STATUS_DEFERRED_MD = """## Deferred items
@@ -313,7 +313,7 @@ STATUS_DEFERRED_MD = """## Deferred items
 ### From phase 02: rework parser entry point
 """
 
-STATUS_FOREMAN_TOML = """[models]
+STATUS_PITBOSS_TOML = """[models]
 implementer = "claude-opus-4-7"
 auditor     = "claude-sonnet-4-6"
 fixer       = "claude-sonnet-4-6"
@@ -325,38 +325,38 @@ max_total_usd    = 5.00
 
 
 def setup_status_workspace(workdir: Path) -> None:
-    """Build a workspace that produces a realistic `foreman status` output:
+    """Build a workspace that produces a realistic `pitboss status` output:
     one completed phase committed on the run branch, deferred items, real
     token usage so the budget block has numbers in it."""
     workdir.mkdir(parents=True, exist_ok=True)
     (workdir / "plan.md").write_text(STATUS_PLAN_MD)
     (workdir / "deferred.md").write_text(STATUS_DEFERRED_MD)
-    (workdir / "foreman.toml").write_text(STATUS_FOREMAN_TOML)
+    (workdir / "pitboss.toml").write_text(STATUS_PITBOSS_TOML)
 
     # Real git history so `last commit:` resolves to a sensible value.
     env = {
         **os.environ,
-        "GIT_AUTHOR_NAME": "foreman",
-        "GIT_AUTHOR_EMAIL": "foreman@example.com",
-        "GIT_COMMITTER_NAME": "foreman",
-        "GIT_COMMITTER_EMAIL": "foreman@example.com",
+        "GIT_AUTHOR_NAME": "pitboss",
+        "GIT_AUTHOR_EMAIL": "pitboss@example.com",
+        "GIT_COMMITTER_NAME": "pitboss",
+        "GIT_COMMITTER_EMAIL": "pitboss@example.com",
     }
     run(["git", "init", "--quiet", "--initial-branch=main"], cwd=workdir)
-    run(["git", "checkout", "--quiet", "-b", "foreman/run-20260429T143022Z"], cwd=workdir, env=env)
+    run(["git", "checkout", "--quiet", "-b", "pitboss/run-20260429T143022Z"], cwd=workdir, env=env)
     (workdir / "src").mkdir()
     (workdir / "src" / "lib.rs").write_text("// scaffold\n")
     run(["git", "add", "src/lib.rs"], cwd=workdir, env=env)
     run(
-        ["git", "commit", "--quiet", "-m", "[foreman] phase 01: Project foundation"],
+        ["git", "commit", "--quiet", "-m", "[pitboss] phase 01: Project foundation"],
         cwd=workdir,
         env=env,
     )
 
-    state_dir = workdir / ".foreman"
+    state_dir = workdir / ".pitboss"
     state_dir.mkdir()
     state = {
         "run_id": "20260429T143022Z",
-        "branch": "foreman/run-20260429T143022Z",
+        "branch": "pitboss/run-20260429T143022Z",
         "original_branch": "main",
         "started_at": "2026-04-29T14:30:22Z",
         "started_phase": "01",
@@ -399,9 +399,9 @@ def write_tape(
     setup = ""
     if cwd:
         setup += f'  Type "cd {cwd}"\n  Enter\n  Sleep 200ms\n'
-    foreman_bin_dir = str(FOREMAN_BIN.parent)
+    pitboss_bin_dir = str(PITBOSS_BIN.parent)
     setup += (
-        f'  Type "export PATH={foreman_bin_dir}:$PATH"\n  Enter\n  Sleep 200ms\n'
+        f'  Type "export PATH={pitboss_bin_dir}:$PATH"\n  Enter\n  Sleep 200ms\n'
     )
     setup += '  Type "clear"\n  Enter\n  Sleep 200ms\n'
     tape = f"""Output "{output_png}"
@@ -435,18 +435,18 @@ def run_vhs(tape: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def ensure_foreman_built() -> None:
-    if FOREMAN_BIN.exists():
+def ensure_pitboss_built() -> None:
+    if PITBOSS_BIN.exists():
         return
-    log("building foreman release binary")
+    log("building pitboss release binary")
     run(["cargo", "build", "--release", "--quiet"], cwd=ROOT)
 
 
 def capture_all() -> None:
-    ensure_foreman_built()
+    ensure_pitboss_built()
     ASSETS.mkdir(exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="foreman-screenshots-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="pitboss-screenshots-") as tmp:
         tmp = Path(tmp)
         demo_dir = tmp / "demo"
         status_dir = tmp / "status-workspace"
@@ -458,15 +458,15 @@ def capture_all() -> None:
 
         scenes: list[tuple[str, str, int, int]] = [
             # name           command                w     h
-            ("foreman-tui",    f"{demo_bin} tui",   1500, 480),
-            ("foreman-halt",   f"{demo_bin} halt",  1500, 460),
-            ("foreman-status", "foreman status",     880, 360),
+            ("pitboss-tui",    f"{demo_bin} tui",   1500, 480),
+            ("pitboss-halt",   f"{demo_bin} halt",  1500, 460),
+            ("pitboss-status", "pitboss status",     880, 360),
         ]
 
         for name, command, w, h in scenes:
             tape = captures / f"{name}.tape"
             png = captures / f"{name}.png"
-            cwd = str(status_dir) if name == "foreman-status" else None
+            cwd = str(status_dir) if name == "pitboss-status" else None
             write_tape(tape, png, command, width=w, height=h, cwd=cwd)
             run_vhs(tape)
             frame_png(png, ASSETS / f"{name}.png")

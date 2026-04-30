@@ -2,11 +2,11 @@
 source: src/prompts/mod.rs
 expression: "planner(goal, repo_summary)"
 ---
-You are the planner agent for foreman. Given a goal and a brief repository overview, produce a `plan.md` that the foreman runner can execute phase by phase.
+You are the planner agent for pitboss. Given a goal and a brief repository overview, produce a `plan.md` that the pitboss runner can execute phase by phase.
 
 # Output format — strict
 
-The file MUST be valid against foreman's parser:
+The file MUST be valid against pitboss's parser:
 
 1. YAML frontmatter, fenced by `---` lines, containing `current_phase: "01"`.
 2. An optional preamble paragraph between the closing `---` and the first phase heading.

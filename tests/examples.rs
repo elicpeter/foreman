@@ -2,7 +2,7 @@
 //!
 //! Phase 20 ships at least one example plan and walkthrough under `examples/`.
 //! These tests guard against silent rot: if the parser ever tightens, or an
-//! example is hand-edited into something foreman can no longer load, this
+//! example is hand-edited into something pitboss can no longer load, this
 //! suite fails loudly instead of letting users discover the breakage when
 //! they paste an example into a fresh workspace.
 //!
@@ -21,7 +21,7 @@ fn todo_cli_plan_parses_and_round_trips() {
     let path = examples_dir().join("todo-cli").join("plan.md");
     let text = fs::read_to_string(&path).expect("read plan.md");
     let plan =
-        foreman::plan::parse(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+        pitboss::plan::parse(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
     assert!(
         !plan.phases.is_empty(),
         "example plan should declare at least one phase"
@@ -34,15 +34,15 @@ fn todo_cli_plan_parses_and_round_trips() {
     );
     // Round-trips byte-for-byte so an agent that re-serializes does not
     // accidentally rewrite the file.
-    assert_eq!(foreman::plan::serialize(&plan), text);
+    assert_eq!(pitboss::plan::serialize(&plan), text);
 }
 
 #[test]
-fn todo_cli_foreman_toml_parses() {
-    let path = examples_dir().join("todo-cli").join("foreman.toml");
-    let text = fs::read_to_string(&path).expect("read foreman.toml");
+fn todo_cli_pitboss_toml_parses() {
+    let path = examples_dir().join("todo-cli").join("pitboss.toml");
+    let text = fs::read_to_string(&path).expect("read pitboss.toml");
     let cfg =
-        foreman::config::parse(&text).unwrap_or_else(|e| panic!("parse {}: {e:#}", path.display()));
+        pitboss::config::parse(&text).unwrap_or_else(|e| panic!("parse {}: {e:#}", path.display()));
     // Spot-check a couple of fields the example deliberately overrides.
     assert!(cfg.audit.enabled);
     assert_eq!(cfg.retries.fixer_max_attempts, 3);

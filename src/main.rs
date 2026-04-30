@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use foreman::cli::{self, Cli};
+use pitboss::cli::{self, Cli};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
 /// Configure `tracing-subscriber` from the CLI flags and environment.
 ///
 /// Precedence (highest first):
-/// 1. `FOREMAN_LOG` env var.
+/// 1. `PITBOSS_LOG` env var.
 /// 2. `RUST_LOG` env var.
 /// 3. `--verbose` / `-v` flag (`-v` → `debug`, `-vv`+ → `trace`).
 /// 4. Built-in default (`info`).
@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
 /// me trace on a single module") still works without removing the flag from a
 /// shell wrapper.
 fn init_tracing(cli: &Cli) {
-    let filter = EnvFilter::try_from_env("FOREMAN_LOG")
+    let filter = EnvFilter::try_from_env("PITBOSS_LOG")
         .or_else(|_| EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| EnvFilter::new(cli.verbose_filter().unwrap_or("info")));
 

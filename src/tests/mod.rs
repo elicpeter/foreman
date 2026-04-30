@@ -2,14 +2,14 @@
 //!
 //! Despite the module name, this is *not* the crate's integration test
 //! directory (that lives at `<crate-root>/tests/`). It's the per-project test
-//! runner the foreman runner invokes after each phase to decide whether the
+//! runner the pitboss runner invokes after each phase to decide whether the
 //! agent's changes pass.
 //!
 //! ## Surface
 //!
 //! [`detect`] probes the workspace for a recognized project layout and returns
 //! a [`TestRunner`] preconfigured to invoke the right command. The probe is
-//! best-effort; foreman.toml's `[tests] command = "..."` overrides detection
+//! best-effort; pitboss.toml's `[tests] command = "..."` overrides detection
 //! entirely, in which case the configured command is used verbatim.
 //!
 //! [`TestRunner::run`] executes the runner, tees combined stdout+stderr to a
@@ -61,7 +61,7 @@ pub struct TestOutcome {
 ///
 /// Independent of `program`/`args` because callers occasionally want to log or
 /// branch on the kind without re-parsing the command line. [`TestRunnerKind::Override`]
-/// signals that the runner came from `foreman.toml` rather than detection.
+/// signals that the runner came from `pitboss.toml` rather than detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestRunnerKind {
     /// `cargo test` — chosen when `Cargo.toml` is present.

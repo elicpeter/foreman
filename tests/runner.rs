@@ -22,13 +22,13 @@ use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use foreman::agent::{Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason};
-use foreman::config::Config;
-use foreman::deferred::DeferredDoc;
-use foreman::git::{Git, ShellGit};
-use foreman::plan::{self, PhaseId};
-use foreman::runner::{self, HaltReason, RunSummary, Runner};
-use foreman::state::TokenUsage;
+use pitboss::agent::{Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason};
+use pitboss::config::Config;
+use pitboss::deferred::DeferredDoc;
+use pitboss::git::{Git, ShellGit};
+use pitboss::plan::{self, PhaseId};
+use pitboss::runner::{self, HaltReason, RunSummary, Runner};
+use pitboss::state::TokenUsage;
 
 fn pid(s: &str) -> PhaseId {
     PhaseId::parse(s).expect("valid phase id")
@@ -118,7 +118,7 @@ const THREE_PHASE_PLAN: &str = "\
 current_phase: \"01\"
 ---
 
-# Foreman Plan
+# Pitboss Plan
 
 Three-phase test fixture.
 
@@ -140,7 +140,7 @@ const ONE_PHASE_PLAN: &str = "\
 current_phase: \"01\"
 ---
 
-# Foreman Plan
+# Pitboss Plan
 
 # Phase 01: Single
 
@@ -153,8 +153,8 @@ fn make_workspace(plan_text: &str, deferred_text: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
     fs::write(dir.path().join("plan.md"), plan_text).unwrap();
     fs::write(dir.path().join("deferred.md"), deferred_text).unwrap();
-    fs::create_dir_all(dir.path().join(".foreman/snapshots")).unwrap();
-    fs::create_dir_all(dir.path().join(".foreman/logs")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/snapshots")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/logs")).unwrap();
     dir
 }
 
@@ -166,8 +166,8 @@ fn init_git_repo(dir: &Path) {
         .expect("git init");
     assert!(status.success(), "git init failed");
     for (k, v) in [
-        ("user.name", "foreman-test"),
-        ("user.email", "foreman@test"),
+        ("user.name", "pitboss-test"),
+        ("user.email", "pitboss@test"),
     ] {
         Command::new("git")
             .args(["-C"])
@@ -218,7 +218,7 @@ async fn build_runner(
     let deferred = if deferred_text.trim().is_empty() {
         DeferredDoc::empty()
     } else {
-        foreman::deferred::parse(deferred_text).expect("parse deferred")
+        pitboss::deferred::parse(deferred_text).expect("parse deferred")
     };
     let state = runner::fresh_run_state(&plan, &config, Utc::now());
 
@@ -273,14 +273,14 @@ async fn run_advances_through_three_phase_plan() {
         "current_phase should sit at the final phase after the last phase completes"
     );
 
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     let completed: Vec<&str> = state.completed.iter().map(|p| p.as_str()).collect();
     assert_eq!(completed, vec!["01", "02", "03"]);
 
     let log = git_log_oneline(dir.path());
     let phase_commits: Vec<&String> = log
         .iter()
-        .filter(|l| l.contains("[foreman] phase"))
+        .filter(|l| l.contains("[pitboss] phase"))
         .collect();
     assert_eq!(
         phase_commits.len(),
@@ -330,7 +330,7 @@ async fn halts_on_plan_tamper_and_restores_snapshot() {
         "plan.md must be byte-for-byte restored after tamper"
     );
 
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert!(
         state.completed.is_empty(),
         "no phase should be marked completed after a tamper halt"
@@ -406,12 +406,12 @@ async fn halts_on_test_failure_with_no_fixer() {
     // No commit should have landed on the per-run branch — only the seed is there.
     let log = git_log_oneline(dir.path());
     assert!(
-        log.iter().all(|l| !l.contains("[foreman] phase")),
+        log.iter().all(|l| !l.contains("[pitboss] phase")),
         "no phase commits expected on test failure; got log:\n{log:?}"
     );
 
     // attempts = 1 because no fixer dispatches were issued.
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(state.attempts.get(&pid("01")).copied(), Some(1));
 }
 
@@ -438,7 +438,7 @@ async fn advances_with_no_commit_when_only_deferred_changed() {
 
     let log = git_log_oneline(dir.path());
     assert!(
-        log.iter().all(|l| !l.contains("[foreman] phase")),
+        log.iter().all(|l| !l.contains("[pitboss] phase")),
         "deferred-only changes must not produce a commit; log:\n{log:?}"
     );
 
@@ -450,7 +450,7 @@ async fn advances_with_no_commit_when_only_deferred_changed() {
     );
 
     // State still records phase as completed.
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(
         state
             .completed
@@ -495,7 +495,7 @@ async fn mixed_changes_with_plan_tamper_halts_before_commit() {
     assert!(dir.path().join("src/foo.rs").exists());
     // No commit landed.
     let log = git_log_oneline(dir.path());
-    assert!(log.iter().all(|l| !l.contains("[foreman] phase")));
+    assert!(log.iter().all(|l| !l.contains("[pitboss] phase")));
 }
 
 #[tokio::test]
@@ -564,7 +564,7 @@ async fn fixer_succeeds_on_attempt_2_and_phase_commits() {
     );
 
     // Per-attempt fixer logs land at the spec'd path.
-    let logs_dir = dir.path().join(".foreman/logs");
+    let logs_dir = dir.path().join(".pitboss/logs");
     assert!(
         logs_dir.join("phase-01-fix-1.log").exists(),
         "phase-01-fix-1.log must exist after first fixer attempt"
@@ -575,7 +575,7 @@ async fn fixer_succeeds_on_attempt_2_and_phase_commits() {
     );
 
     // attempts counter == 3: implementer + 2 fixer dispatches.
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(
         state.attempts.get(&pid("01")).copied(),
         Some(3),
@@ -594,7 +594,7 @@ async fn fixer_succeeds_on_attempt_2_and_phase_commits() {
     let log = git_log_oneline(dir.path());
     let phase_commits: Vec<&String> = log
         .iter()
-        .filter(|l| l.contains("[foreman] phase"))
+        .filter(|l| l.contains("[pitboss] phase"))
         .collect();
     assert_eq!(
         phase_commits.len(),
@@ -641,19 +641,19 @@ async fn fixer_exhausts_retries_then_halts_with_tests_failed() {
     }
 
     // Both fixer attempt logs exist even though the loop exhausted.
-    let logs_dir = dir.path().join(".foreman/logs");
+    let logs_dir = dir.path().join(".pitboss/logs");
     assert!(logs_dir.join("phase-01-fix-1.log").exists());
     assert!(logs_dir.join("phase-01-fix-2.log").exists());
 
     // No phase commit landed.
     let log = git_log_oneline(dir.path());
     assert!(
-        log.iter().all(|l| !l.contains("[foreman] phase")),
+        log.iter().all(|l| !l.contains("[pitboss] phase")),
         "no phase commit expected on fixer exhaustion; got log:\n{log:?}"
     );
 
     // attempts counter == 3 (1 implementer + 2 fixer); phase NOT in completed.
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(state.attempts.get(&pid("01")).copied(), Some(3));
     assert!(
         state.completed.is_empty(),
@@ -663,7 +663,7 @@ async fn fixer_exhausts_retries_then_halts_with_tests_failed() {
 
 #[tokio::test]
 async fn fixer_emits_fixer_started_events_with_increasing_attempt() {
-    use foreman::runner::Event;
+    use pitboss::runner::Event;
     use tokio::sync::broadcast::error::RecvError;
 
     let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
@@ -750,7 +750,7 @@ async fn auditor_inlines_small_fix_and_commits_combined_diff() {
     let log = git_log_oneline(dir.path());
     let phase_commits: Vec<&String> = log
         .iter()
-        .filter(|l| l.contains("[foreman] phase"))
+        .filter(|l| l.contains("[pitboss] phase"))
         .collect();
     assert_eq!(
         phase_commits.len(),
@@ -761,13 +761,13 @@ async fn auditor_inlines_small_fix_and_commits_combined_diff() {
     // Audit log written under the conventional path.
     assert!(
         dir.path()
-            .join(".foreman/logs/phase-01-audit-1.log")
+            .join(".pitboss/logs/phase-01-audit-1.log")
             .exists(),
         "phase-01-audit-1.log must exist after the auditor pass"
     );
 
     // attempts counter == 2 (1 implementer + 1 auditor).
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(
         state.attempts.get(&pid("01")).copied(),
         Some(2),
@@ -814,7 +814,7 @@ async fn auditor_defers_large_finding_to_deferred_md() {
     let log = git_log_oneline(dir.path());
     let phase_commits: Vec<&String> = log
         .iter()
-        .filter(|l| l.contains("[foreman] phase"))
+        .filter(|l| l.contains("[pitboss] phase"))
         .collect();
     assert_eq!(phase_commits.len(), 1, "log:\n{log:?}");
 
@@ -831,7 +831,7 @@ async fn auditor_defers_large_finding_to_deferred_md() {
 /// because there's no diff to audit, and the run advances without a commit.
 #[tokio::test]
 async fn auditor_skipped_when_implementer_only_touched_planning_artifacts() {
-    use foreman::runner::Event;
+    use pitboss::runner::Event;
     use tokio::sync::broadcast::error::RecvError;
 
     let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
@@ -880,10 +880,10 @@ async fn auditor_skipped_when_implementer_only_touched_planning_artifacts() {
 
     // No commit (only excluded paths changed).
     let log = git_log_oneline(dir.path());
-    assert!(log.iter().all(|l| !l.contains("[foreman] phase")));
+    assert!(log.iter().all(|l| !l.contains("[pitboss] phase")));
 
     // attempts counter stays at 1 (just the implementer).
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(state.attempts.get(&pid("01")).copied(), Some(1));
 }
 
@@ -928,7 +928,7 @@ async fn auditor_test_failure_halts_phase() {
     }
 
     // Phase not marked completed.
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert!(state.completed.is_empty());
     // attempts counter == 2 (implementer + auditor).
     assert_eq!(state.attempts.get(&pid("01")).copied(), Some(2));
@@ -936,7 +936,7 @@ async fn auditor_test_failure_halts_phase() {
     // No phase commit landed.
     let log = git_log_oneline(dir.path());
     assert!(
-        log.iter().all(|l| !l.contains("[foreman] phase")),
+        log.iter().all(|l| !l.contains("[pitboss] phase")),
         "no phase commit expected after auditor broke tests; log:\n{log:?}"
     );
 }
@@ -945,7 +945,7 @@ async fn auditor_test_failure_halts_phase() {
 /// flow with no auditor dispatch and no AuditorStarted event.
 #[tokio::test]
 async fn audit_disabled_path_skips_auditor_entirely() {
-    use foreman::runner::Event;
+    use pitboss::runner::Event;
     use tokio::sync::broadcast::error::RecvError;
 
     let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
@@ -991,15 +991,15 @@ async fn audit_disabled_path_skips_auditor_entirely() {
     );
 
     // attempts counter == 1 (implementer only).
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(state.attempts.get(&pid("01")).copied(), Some(1));
 }
 
 /// Regression test: `runner::log_events` must return after the runner emits
 /// its terminal event, even though the runner keeps holding the broadcast
 /// `Sender` (it's needed for post-run lookups like PR creation). Before this
-/// was wired up, `foreman run --dry-run` would advance through every phase,
-/// print "[foreman] run finished", and then hang the process forever waiting
+/// was wired up, `pitboss run --dry-run` would advance through every phase,
+/// print "[pitboss] run finished", and then hang the process forever waiting
 /// on the logger task.
 #[tokio::test]
 async fn log_events_returns_after_run_finished_even_with_runner_alive() {
@@ -1022,7 +1022,7 @@ async fn log_events_returns_after_run_finished_even_with_runner_alive() {
     .await;
 
     let rx = runner.subscribe();
-    let logger = tokio::spawn(foreman::runner::log_events(rx));
+    let logger = tokio::spawn(pitboss::runner::log_events(rx));
 
     let summary = runner.run().await.unwrap();
     assert!(matches!(summary, RunSummary::Finished));
@@ -1059,7 +1059,7 @@ async fn log_events_returns_after_phase_halted_even_with_runner_alive() {
     .await;
 
     let rx = runner.subscribe();
-    let logger = tokio::spawn(foreman::runner::log_events(rx));
+    let logger = tokio::spawn(pitboss::runner::log_events(rx));
 
     let summary = runner.run().await.unwrap();
     assert!(matches!(summary, RunSummary::Halted { .. }));
@@ -1076,7 +1076,7 @@ async fn log_events_returns_after_phase_halted_even_with_runner_alive() {
 /// per-phase commits happen when the agent staged code.
 #[tokio::test]
 async fn skip_tests_bypasses_test_detection_and_still_advances() {
-    use foreman::runner::Event;
+    use pitboss::runner::Event;
     use tokio::sync::broadcast::error::RecvError;
 
     let dir = make_workspace(ONE_PHASE_PLAN, EMPTY_DEFERRED);
@@ -1137,7 +1137,7 @@ async fn skip_tests_bypasses_test_detection_and_still_advances() {
     let log = git_log_oneline(dir.path());
     let phase_commits: Vec<&String> = log
         .iter()
-        .filter(|l| l.contains("[foreman] phase"))
+        .filter(|l| l.contains("[pitboss] phase"))
         .collect();
     assert_eq!(
         phase_commits.len(),
@@ -1206,7 +1206,7 @@ async fn token_budget_halts_run_before_next_phase_dispatch() {
     let log = git_log_oneline(dir.path());
     let phase_commits: Vec<&String> = log
         .iter()
-        .filter(|l| l.contains("[foreman] phase"))
+        .filter(|l| l.contains("[pitboss] phase"))
         .collect();
     assert_eq!(
         phase_commits.len(),
@@ -1215,7 +1215,7 @@ async fn token_budget_halts_run_before_next_phase_dispatch() {
     );
 
     // State reflects phase 1 completed and the implementer's per-role usage.
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(
         state
             .completed
@@ -1272,7 +1272,7 @@ async fn usd_budget_halts_when_priced_usage_exceeds_cap() {
     }
 
     // Per-role breakdown was preserved through the halt.
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     let impl_usage = state.token_usage.by_role.get("implementer").unwrap();
     assert_eq!(impl_usage.input, 1_000_000);
     assert_eq!(impl_usage.output, 1_000_000);
@@ -1295,11 +1295,11 @@ async fn budget_check_fires_for_first_dispatch_when_usage_already_at_cap() {
     // mutated state and persist it before constructing the Runner so the
     // first dispatch has a tripped budget to react to.
     use chrono::Utc;
-    use foreman::config::Config;
-    use foreman::deferred::DeferredDoc;
-    use foreman::plan;
-    use foreman::runner;
-    use foreman::state;
+    use pitboss::config::Config;
+    use pitboss::deferred::DeferredDoc;
+    use pitboss::plan;
+    use pitboss::runner;
+    use pitboss::state;
 
     let plan_obj = plan::parse(ONE_PHASE_PLAN).unwrap();
     let _ = DeferredDoc::empty();
@@ -1311,7 +1311,7 @@ async fn budget_check_fires_for_first_dispatch_when_usage_already_at_cap() {
 
     // Build runner with this state. We cannot reuse `build_runner` because it
     // calls `fresh_run_state` itself; do it manually.
-    use foreman::git::{Git, ShellGit};
+    use pitboss::git::{Git, ShellGit};
     let git = ShellGit::new(dir.path());
     git.create_branch(&state_obj.branch).await.unwrap();
     git.checkout(&state_obj.branch).await.unwrap();
@@ -1320,7 +1320,7 @@ async fn budget_check_fires_for_first_dispatch_when_usage_already_at_cap() {
         Script::default().write("src/never.rs", b"// should not appear\n")
     ]);
     let runner_git = ShellGit::new(dir.path());
-    let mut runner = foreman::runner::Runner::new(
+    let mut runner = pitboss::runner::Runner::new(
         dir.path().to_path_buf(),
         config,
         plan_obj,
@@ -1345,6 +1345,6 @@ async fn budget_check_fires_for_first_dispatch_when_usage_already_at_cap() {
     // Implementer never dispatched, so the script's file isn't on disk and
     // attempts is empty.
     assert!(!dir.path().join("src/never.rs").exists());
-    let state = foreman::state::load(dir.path()).unwrap().expect("state");
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert!(state.attempts.is_empty());
 }

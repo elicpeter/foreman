@@ -1,4 +1,4 @@
-//! `foreman init` — scaffold a workspace.
+//! `pitboss init` — scaffold a workspace.
 //!
 //! Idempotent and never destructive: every artifact is created only when
 //! missing; pre-existing files are left byte-for-byte alone with a warning on
@@ -22,9 +22,9 @@ const PLAN_TEMPLATE: &str = "\
 current_phase: \"01\"
 ---
 
-# Foreman Plan
+# Pitboss Plan
 
-Replace this preamble with a description of the work foreman will orchestrate.
+Replace this preamble with a description of the work pitboss will orchestrate.
 
 # Phase 01: First phase
 
@@ -46,11 +46,11 @@ const DEFERRED_TEMPLATE: &str = "\
 ## Deferred phases
 ";
 
-/// Default `foreman.toml`. The values here mirror [`crate::config::Config`]'s
+/// Default `pitboss.toml`. The values here mirror [`crate::config::Config`]'s
 /// `Default` impl exactly — a freshly initialized workspace round-trips
 /// through `config::load` to `Config::default()`. Edit both together.
-const FOREMAN_TOML_TEMPLATE: &str = "\
-# foreman configuration
+const PITBOSS_TOML_TEMPLATE: &str = "\
+# pitboss configuration
 
 [models]
 planner = \"claude-opus-4-7\"
@@ -67,14 +67,14 @@ enabled = true
 small_fix_line_limit = 30
 
 [git]
-branch_prefix = \"foreman/run-\"
+branch_prefix = \"pitboss/run-\"
 create_pr = false
 ";
 
 /// Marker line appended to `.gitignore`. Matched verbatim against trimmed
-/// existing lines; only `".foreman"` and `".foreman/"` are recognized as
+/// existing lines; only `".pitboss"` and `".pitboss/"` are recognized as
 /// already-present.
-const GITIGNORE_ENTRY: &str = ".foreman/";
+const GITIGNORE_ENTRY: &str = ".pitboss/";
 
 /// What `init` did (or didn't do) to a single path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +96,7 @@ pub struct ReportEntry {
     pub action: Action,
 }
 
-/// Scaffold a foreman workspace under `workspace`. Idempotent.
+/// Scaffold a pitboss workspace under `workspace`. Idempotent.
 ///
 /// Stdout receives one line per artifact ("created plan.md",
 /// "skipped plan.md (already exists)", etc.). Stderr receives a warning for
@@ -118,14 +118,14 @@ pub fn run(workspace: impl AsRef<Path>) -> Result<()> {
     )?;
     write_if_missing(
         workspace,
-        "foreman.toml",
-        FOREMAN_TOML_TEMPLATE.as_bytes(),
+        "pitboss.toml",
+        PITBOSS_TOML_TEMPLATE.as_bytes(),
         &mut report,
     )?;
 
-    ensure_dir(workspace, ".foreman", &mut report)?;
-    ensure_dir(workspace, ".foreman/snapshots", &mut report)?;
-    ensure_dir(workspace, ".foreman/logs", &mut report)?;
+    ensure_dir(workspace, ".pitboss", &mut report)?;
+    ensure_dir(workspace, ".pitboss/snapshots", &mut report)?;
+    ensure_dir(workspace, ".pitboss/logs", &mut report)?;
 
     init_state_file(workspace, &mut report)?;
     update_gitignore(workspace, &mut report)?;
@@ -188,7 +188,7 @@ fn ensure_dir(workspace: &Path, rel: &str, report: &mut Vec<ReportEntry>) -> Res
 
 fn init_state_file(workspace: &Path, report: &mut Vec<ReportEntry>) -> Result<()> {
     let path = state::state_path(workspace);
-    let rel = ".foreman/state.json".to_string();
+    let rel = ".pitboss/state.json".to_string();
     if path.exists() {
         warn_skipped(&rel);
         report.push(ReportEntry {
@@ -216,7 +216,7 @@ fn update_gitignore(workspace: &Path, report: &mut Vec<ReportEntry>) -> Result<(
     };
 
     if let Some(ref text) = existing {
-        if has_foreman_entry(text) {
+        if has_pitboss_entry(text) {
             report.push(ReportEntry {
                 path: rel,
                 action: Action::Skipped,
@@ -238,16 +238,16 @@ fn update_gitignore(workspace: &Path, report: &mut Vec<ReportEntry>) -> Result<(
     Ok(())
 }
 
-fn has_foreman_entry(text: &str) -> bool {
+fn has_pitboss_entry(text: &str) -> bool {
     text.lines().any(|line| {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             return false;
         }
-        // Strip an optional leading slash so `/.foreman/` and `.foreman/` both
+        // Strip an optional leading slash so `/.pitboss/` and `.pitboss/` both
         // count as the same entry. Trailing slash is also optional.
         let canonical = trimmed.trim_start_matches('/').trim_end_matches('/');
-        canonical == ".foreman"
+        canonical == ".pitboss"
     })
 }
 
@@ -321,11 +321,11 @@ mod tests {
         for rel in [
             "plan.md",
             "deferred.md",
-            "foreman.toml",
-            ".foreman",
-            ".foreman/snapshots",
-            ".foreman/logs",
-            ".foreman/state.json",
+            "pitboss.toml",
+            ".pitboss",
+            ".pitboss/snapshots",
+            ".pitboss/logs",
+            ".pitboss/state.json",
             ".gitignore",
         ] {
             assert!(
@@ -356,8 +356,8 @@ mod tests {
         let snapshot_paths = [
             "plan.md",
             "deferred.md",
-            "foreman.toml",
-            ".foreman/state.json",
+            "pitboss.toml",
+            ".pitboss/state.json",
             ".gitignore",
         ];
         let before: Vec<Vec<u8>> = snapshot_paths
@@ -387,11 +387,11 @@ mod tests {
     }
 
     #[test]
-    fn gitignore_is_created_with_foreman_entry() {
+    fn gitignore_is_created_with_pitboss_entry() {
         let dir = tempdir().unwrap();
         run(dir.path()).unwrap();
         let gi = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
-        assert!(gi.contains(".foreman/"));
+        assert!(gi.contains(".pitboss/"));
     }
 
     #[test]
@@ -401,12 +401,12 @@ mod tests {
         run(dir.path()).unwrap();
         let gi = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(gi.starts_with("/target\n"));
-        assert!(gi.contains(".foreman/"));
+        assert!(gi.contains(".pitboss/"));
     }
 
     #[test]
     fn gitignore_entry_recognized_in_several_forms() {
-        for line in [".foreman", ".foreman/", "/.foreman", "/.foreman/"] {
+        for line in [".pitboss", ".pitboss/", "/.pitboss", "/.pitboss/"] {
             let dir = tempdir().unwrap();
             fs::write(
                 dir.path().join(".gitignore"),
@@ -420,7 +420,7 @@ mod tests {
                 .lines()
                 .filter(|l| {
                     let t = l.trim().trim_start_matches('/').trim_end_matches('/');
-                    t == ".foreman"
+                    t == ".pitboss"
                 })
                 .count();
             assert_eq!(occurrences, 1, "input form {:?}, full file: {:?}", line, gi);
@@ -436,15 +436,15 @@ mod tests {
         let gi = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         let occurrences = gi
             .lines()
-            .filter(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".foreman")
+            .filter(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".pitboss")
             .count();
         assert_eq!(occurrences, 1);
     }
 
     #[test]
-    fn rejects_non_directory_at_dot_foreman() {
+    fn rejects_non_directory_at_dot_pitboss() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".foreman"), b"oops").unwrap();
+        fs::write(dir.path().join(".pitboss"), b"oops").unwrap();
         let err = run(dir.path()).unwrap_err();
         assert!(err.to_string().contains("is not a directory"));
     }

@@ -273,7 +273,7 @@ impl App {
             .unwrap_or("");
         let line1 = Line::from(vec![
             Span::styled(
-                "foreman",
+                "pitboss",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -573,7 +573,7 @@ mod tests {
     fn fresh_state() -> RunState {
         RunState::new(
             "20260430T120000Z",
-            "foreman/run-20260430T120000Z",
+            "pitboss/run-20260430T120000Z",
             pid("01"),
         )
     }

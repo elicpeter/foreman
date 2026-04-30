@@ -308,10 +308,10 @@ mod tests {
     #[tokio::test]
     async fn create_then_checkout_switches_current_branch() {
         let git = MockGit::new();
-        git.create_branch("foreman/run-x").await.unwrap();
+        git.create_branch("pitboss/run-x").await.unwrap();
         assert_eq!(git.current_branch().await.unwrap(), "main");
-        git.checkout("foreman/run-x").await.unwrap();
-        assert_eq!(git.current_branch().await.unwrap(), "foreman/run-x");
+        git.checkout("pitboss/run-x").await.unwrap();
+        assert_eq!(git.current_branch().await.unwrap(), "pitboss/run-x");
     }
 
     #[tokio::test]
@@ -335,12 +335,12 @@ mod tests {
         git.touch("src/foo.rs");
         git.touch("plan.md");
         git.touch("deferred.md");
-        git.touch(".foreman/state.json");
+        git.touch(".pitboss/state.json");
 
         let plan = Path::new("plan.md");
         let deferred = Path::new("deferred.md");
-        let foreman = Path::new(".foreman");
-        git.stage_changes(&[plan, deferred, foreman]).await.unwrap();
+        let pitboss = Path::new(".pitboss");
+        git.stage_changes(&[plan, deferred, pitboss]).await.unwrap();
 
         let exclusions = git.last_exclusions().unwrap();
         assert_eq!(
@@ -348,27 +348,27 @@ mod tests {
             vec![
                 PathBuf::from("plan.md"),
                 PathBuf::from("deferred.md"),
-                PathBuf::from(".foreman"),
+                PathBuf::from(".pitboss"),
             ]
         );
 
         // Index should now hold only `src/foo.rs`.
         assert!(git.has_staged_changes().await.unwrap());
-        let id = git.commit("[foreman] phase 01: code only").await.unwrap();
+        let id = git.commit("[pitboss] phase 01: code only").await.unwrap();
         let commits = git.commits();
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].id, id);
         assert_eq!(commits[0].files, vec![PathBuf::from("src/foo.rs")]);
         assert_eq!(commits[0].branch, "main");
-        assert_eq!(commits[0].message, "[foreman] phase 01: code only");
+        assert_eq!(commits[0].message, "[pitboss] phase 01: code only");
     }
 
     #[tokio::test]
     async fn empty_index_path_when_only_excluded_files_changed() {
         let git = MockGit::new();
         git.touch("plan.md");
-        git.touch(".foreman/state.json");
-        git.stage_changes(&[Path::new("plan.md"), Path::new(".foreman")])
+        git.touch(".pitboss/state.json");
+        git.stage_changes(&[Path::new("plan.md"), Path::new(".pitboss")])
             .await
             .unwrap();
         assert!(!git.has_staged_changes().await.unwrap());
@@ -469,11 +469,11 @@ mod tests {
     #[test]
     fn is_excluded_treats_directory_paths_as_prefixes() {
         let mut set = HashSet::new();
-        set.insert(PathBuf::from(".foreman"));
-        assert!(is_excluded(Path::new(".foreman"), &set));
-        assert!(is_excluded(Path::new(".foreman/state.json"), &set));
-        assert!(is_excluded(Path::new(".foreman/logs/x.log"), &set));
+        set.insert(PathBuf::from(".pitboss"));
+        assert!(is_excluded(Path::new(".pitboss"), &set));
+        assert!(is_excluded(Path::new(".pitboss/state.json"), &set));
+        assert!(is_excluded(Path::new(".pitboss/logs/x.log"), &set));
         assert!(!is_excluded(Path::new("src/foo.rs"), &set));
-        assert!(!is_excluded(Path::new(".foremanx"), &set));
+        assert!(!is_excluded(Path::new(".pitbossx"), &set));
     }
 }

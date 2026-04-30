@@ -1,12 +1,12 @@
-//! `foreman abort` — mark the active run aborted, optionally restoring the
+//! `pitboss abort` — mark the active run aborted, optionally restoring the
 //! pre-run branch.
 //!
-//! Sets `state.aborted = true` so subsequent `foreman run` and `foreman
+//! Sets `state.aborted = true` so subsequent `pitboss run` and `pitboss
 //! resume` invocations refuse the workspace. The state file is preserved as a
 //! breadcrumb (run id, branch, attempts, token usage) — clearing it is left to
 //! the user, since deleting state is irreversible. With
 //! `--checkout-original`, after the state update the original branch
-//! recorded by `foreman run` (when known) is checked out via the shell git
+//! recorded by `pitboss run` (when known) is checked out via the shell git
 //! integration.
 
 use std::io::Write;
@@ -29,13 +29,13 @@ pub async fn run(workspace: PathBuf, checkout_original: bool) -> Result<()> {
     {
         Some(s) => s,
         None => bail!(
-            "no active run to abort: .foreman/state.json is empty in {:?}",
+            "no active run to abort: .pitboss/state.json is empty in {:?}",
             workspace
         ),
     };
 
     if state.aborted {
-        // Idempotent: a second `foreman abort` is not an error, but we still
+        // Idempotent: a second `pitboss abort` is not an error, but we still
         // honor `--checkout-original` so users can use it to restore the
         // branch even after a prior abort.
         let stdout = std::io::stdout();

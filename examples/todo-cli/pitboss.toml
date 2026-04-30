@@ -17,7 +17,7 @@ enabled              = true
 small_fix_line_limit = 30
 
 [git]
-branch_prefix = "foreman/run-"
+branch_prefix = "pitboss/run-"
 create_pr     = false
 
 # Conservative cost guard so a runaway loop can't blow past a coffee's worth

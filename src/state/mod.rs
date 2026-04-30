@@ -1,4 +1,4 @@
-//! Runner-owned state stored at `.foreman/state.json`.
+//! Runner-owned state stored at `.pitboss/state.json`.
 //!
 //! Phase 2 introduces the type vocabulary; phase 5 wires the atomic load/save
 //! helpers that read and write this struct from disk.
@@ -20,9 +20,9 @@ use crate::plan::PhaseId;
 use crate::util::write_atomic;
 
 /// Path of the runner-owned state file inside a workspace
-/// (`<workspace>/.foreman/state.json`).
+/// (`<workspace>/.pitboss/state.json`).
 pub fn state_path(workspace: impl AsRef<Path>) -> PathBuf {
-    workspace.as_ref().join(".foreman").join("state.json")
+    workspace.as_ref().join(".pitboss").join("state.json")
 }
 
 /// Read the state file from a workspace.
@@ -48,7 +48,7 @@ pub fn load(workspace: impl AsRef<Path>) -> Result<Option<RunState>> {
     Ok(parsed)
 }
 
-/// Atomically write the state file. Creates the `.foreman/` directory if it
+/// Atomically write the state file. Creates the `.pitboss/` directory if it
 /// does not already exist. Pass `None` to mark the workspace as having no
 /// active run; the file is written as JSON `null`.
 pub fn save(workspace: impl AsRef<Path>, state: Option<&RunState>) -> Result<()> {
@@ -84,7 +84,7 @@ pub struct TokenUsage {
     pub by_role: HashMap<String, RoleUsage>,
 }
 
-/// Persistent runner state stored at `.foreman/state.json`.
+/// Persistent runner state stored at `.pitboss/state.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunState {
     /// Stable identifier for this run (typically a UTC timestamp slug).
@@ -92,7 +92,7 @@ pub struct RunState {
     /// Git branch the runner is committing to.
     pub branch: String,
     /// Branch that was checked out before the run started, captured by
-    /// `foreman run` on the fresh-run path so `foreman abort
+    /// `pitboss run` on the fresh-run path so `pitboss abort
     /// --checkout-original` can restore it. `None` when the run was started
     /// before this field existed (older state files) or when the original
     /// branch could not be resolved (detached HEAD).
@@ -108,9 +108,9 @@ pub struct RunState {
     pub attempts: HashMap<PhaseId, u32>,
     /// Aggregated token usage so far.
     pub token_usage: TokenUsage,
-    /// `true` once the run has been explicitly aborted via `foreman abort`.
-    /// `foreman run` and `foreman resume` refuse to act on an aborted run; the
-    /// user must clear `.foreman/state.json` (e.g., re-run `foreman init` after
+    /// `true` once the run has been explicitly aborted via `pitboss abort`.
+    /// `pitboss run` and `pitboss resume` refuse to act on an aborted run; the
+    /// user must clear `.pitboss/state.json` (e.g., re-run `pitboss init` after
     /// removing it) to start over.
     #[serde(default)]
     pub aborted: bool,
@@ -169,7 +169,7 @@ mod tests {
 
         let state = RunState {
             run_id: "20260429T143022Z".into(),
-            branch: "foreman/run-20260429T143022Z".into(),
+            branch: "pitboss/run-20260429T143022Z".into(),
             original_branch: Some("main".into()),
             started_at: DateTime::parse_from_rfc3339("2026-04-29T14:30:22Z")
                 .unwrap()
@@ -194,7 +194,7 @@ mod tests {
     fn deserializes_legacy_state_without_new_fields() {
         // Older state.json files predate `original_branch` and `aborted`.
         // Both must default cleanly so a workspace started under an earlier
-        // foreman build resumes under this one without manual surgery.
+        // pitboss build resumes under this one without manual surgery.
         let legacy = serde_json::json!({
             "run_id": "rid",
             "branch": "br",
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn load_returns_none_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
-        // No `.foreman/` at all.
+        // No `.pitboss/` at all.
         assert!(load(dir.path()).unwrap().is_none());
     }
 

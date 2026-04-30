@@ -8,7 +8,7 @@
 //! ## Shape
 //!
 //! - [`AgentRequest`] is the per-dispatch input. Composed once by the runner
-//!   from `foreman.toml`, the active phase, and the prompt template.
+//!   from `pitboss.toml`, the active phase, and the prompt template.
 //! - [`AgentEvent`] is streamed on the caller-supplied
 //!   [`tokio::sync::mpsc::Sender`] while the agent runs. Events are best-effort
 //!   — if the receiver is dropped, the agent keeps running and continues to
@@ -38,12 +38,12 @@ pub use subprocess::{run_logged, SubprocessOutcome};
 
 /// Which agent role is being dispatched.
 ///
-/// Round-trips through serde as the lowercase string used in `foreman.toml`'s
+/// Round-trips through serde as the lowercase string used in `pitboss.toml`'s
 /// `[models]` keys, so a single source of truth covers config and runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
-    /// `foreman plan` — generates a fresh `plan.md` from a goal.
+    /// `pitboss plan` — generates a fresh `plan.md` from a goal.
     Planner,
     /// Per-phase implementation pass — the bulk of token spend.
     Implementer,
@@ -54,7 +54,7 @@ pub enum Role {
 }
 
 impl Role {
-    /// String name matching the `foreman.toml` `[models]` key. Stable.
+    /// String name matching the `pitboss.toml` `[models]` key. Stable.
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Planner => "planner",

@@ -1,4 +1,4 @@
-//! `foreman status` — print a summary of the current run.
+//! `pitboss status` — print a summary of the current run.
 //!
 //! Loads `state.json`, `plan.md`, and `deferred.md` and renders a multi-line
 //! report covering the run id and branch, the active phase against the
@@ -8,7 +8,7 @@
 //! `status` is read-only: it never mutates state, never creates branches, and
 //! is safe to invoke at any time. A workspace with no started run prints a
 //! single line indicating that fact (and the seed plan's current phase) so
-//! `foreman init && foreman status` is meaningful.
+//! `pitboss init && pitboss status` is meaningful.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,7 +73,7 @@ pub fn render_report(
             out.push_str(&format!(
                 "{}: {}\n",
                 lbl("run"),
-                col(c, style::YELLOW, "not started (no .foreman/state.json)")
+                col(c, style::YELLOW, "not started (no .pitboss/state.json)")
             ));
         }
         Some(s) if s.aborted => {
@@ -311,7 +311,7 @@ mod tests {
         );
         RunState {
             run_id: "20260429T143022Z".into(),
-            branch: "foreman/run-20260429T143022Z".into(),
+            branch: "pitboss/run-20260429T143022Z".into(),
             original_branch: Some("main".into()),
             started_at: DateTime::parse_from_rfc3339("2026-04-29T14:30:22Z")
                 .unwrap()
@@ -371,7 +371,7 @@ mod tests {
 
         assert!(report.contains("run: 20260429T143022Z"), "report: {report}");
         assert!(
-            report.contains("branch: foreman/run-20260429T143022Z"),
+            report.contains("branch: pitboss/run-20260429T143022Z"),
             "report: {report}"
         );
         assert!(report.contains("original branch: main"), "report: {report}");

@@ -278,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_failure_returns_setup_error() {
-        let log = std::env::temp_dir().join("foreman-spawn-fail.log");
+        let log = std::env::temp_dir().join("pitboss-spawn-fail.log");
         let cmd = Command::new("/this/binary/does/not/exist");
         let (tx, _rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();

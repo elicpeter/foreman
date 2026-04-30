@@ -1,4 +1,4 @@
-//! Integration tests for `foreman init`.
+//! Integration tests for `pitboss init`.
 //!
 //! Drives the binary via `assert_cmd` against a temp directory so we exercise
 //! the full clap-dispatch path (and prove `init` honors `current_dir()`).
@@ -9,35 +9,35 @@ use assert_cmd::Command;
 use predicates::str::contains;
 use tempfile::tempdir;
 
-fn foreman() -> Command {
-    Command::cargo_bin("foreman").expect("foreman binary should be built")
+fn pitboss() -> Command {
+    Command::cargo_bin("pitboss").expect("pitboss binary should be built")
 }
 
 #[test]
 fn fresh_init_creates_every_artifact() {
     let dir = tempdir().unwrap();
 
-    foreman()
+    pitboss()
         .arg("init")
         .current_dir(dir.path())
         .assert()
         .success()
         .stdout(contains("created plan.md"))
         .stdout(contains("created deferred.md"))
-        .stdout(contains("created foreman.toml"))
-        .stdout(contains("created .foreman/"))
-        .stdout(contains("created .foreman/snapshots/"))
-        .stdout(contains("created .foreman/logs/"))
-        .stdout(contains("created .foreman/state.json"));
+        .stdout(contains("created pitboss.toml"))
+        .stdout(contains("created .pitboss/"))
+        .stdout(contains("created .pitboss/snapshots/"))
+        .stdout(contains("created .pitboss/logs/"))
+        .stdout(contains("created .pitboss/state.json"));
 
     for rel in [
         "plan.md",
         "deferred.md",
-        "foreman.toml",
-        ".foreman",
-        ".foreman/snapshots",
-        ".foreman/logs",
-        ".foreman/state.json",
+        "pitboss.toml",
+        ".pitboss",
+        ".pitboss/snapshots",
+        ".pitboss/logs",
+        ".pitboss/state.json",
         ".gitignore",
     ] {
         assert!(
@@ -52,7 +52,7 @@ fn fresh_init_creates_every_artifact() {
 fn rerun_init_is_idempotent_and_prints_skipped() {
     let dir = tempdir().unwrap();
 
-    foreman()
+    pitboss()
         .arg("init")
         .current_dir(dir.path())
         .assert()
@@ -61,8 +61,8 @@ fn rerun_init_is_idempotent_and_prints_skipped() {
     let snapshot_paths = [
         "plan.md",
         "deferred.md",
-        "foreman.toml",
-        ".foreman/state.json",
+        "pitboss.toml",
+        ".pitboss/state.json",
         ".gitignore",
     ];
     let before: Vec<Vec<u8>> = snapshot_paths
@@ -70,15 +70,15 @@ fn rerun_init_is_idempotent_and_prints_skipped() {
         .map(|p| fs::read(dir.path().join(p)).unwrap())
         .collect();
 
-    foreman()
+    pitboss()
         .arg("init")
         .current_dir(dir.path())
         .assert()
         .success()
         .stdout(contains("skipped plan.md (already exists)"))
         .stdout(contains("skipped deferred.md (already exists)"))
-        .stdout(contains("skipped foreman.toml (already exists)"))
-        .stdout(contains("skipped .foreman/state.json (already exists)"))
+        .stdout(contains("skipped pitboss.toml (already exists)"))
+        .stdout(contains("skipped .pitboss/state.json (already exists)"))
         .stdout(contains("skipped .gitignore (already exists)"));
 
     let after: Vec<Vec<u8>> = snapshot_paths
@@ -94,7 +94,7 @@ fn preexisting_plan_md_survives_byte_for_byte_with_warning_on_stderr() {
     let custom = "---\ncurrent_phase: \"05\"\n---\n\n# Phase 05: Custom\n\nhand-written body.\n";
     fs::write(dir.path().join("plan.md"), custom).unwrap();
 
-    foreman()
+    pitboss()
         .arg("init")
         .current_dir(dir.path())
         .assert()
@@ -114,7 +114,7 @@ fn gitignore_is_updated_idempotently() {
     fs::write(dir.path().join(".gitignore"), "/target\n").unwrap();
 
     for _ in 0..3 {
-        foreman()
+        pitboss()
             .arg("init")
             .current_dir(dir.path())
             .assert()
@@ -125,18 +125,18 @@ fn gitignore_is_updated_idempotently() {
     assert!(gi.starts_with("/target\n"), "preserves existing entry");
     let occurrences = gi
         .lines()
-        .filter(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".foreman")
+        .filter(|l| l.trim().trim_start_matches('/').trim_end_matches('/') == ".pitboss")
         .count();
-    assert_eq!(occurrences, 1, ".foreman entry must appear exactly once");
+    assert_eq!(occurrences, 1, ".pitboss entry must appear exactly once");
 }
 
 #[test]
-fn preexisting_gitignore_with_foreman_entry_is_left_alone() {
+fn preexisting_gitignore_with_pitboss_entry_is_left_alone() {
     let dir = tempdir().unwrap();
-    let original = "/target\n.foreman/\n";
+    let original = "/target\n.pitboss/\n";
     fs::write(dir.path().join(".gitignore"), original).unwrap();
 
-    foreman()
+    pitboss()
         .arg("init")
         .current_dir(dir.path())
         .assert()

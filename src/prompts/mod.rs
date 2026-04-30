@@ -41,7 +41,7 @@ pub const TEMPLATE_STATIC_BUDGET: usize = 8_000;
 
 /// Render the implementer prompt. The output instructs the agent to sweep
 /// `deferred.md`, then implement the current phase, then re-record any
-/// unfinished work, while leaving `plan.md` and `.foreman/` untouched.
+/// unfinished work, while leaving `plan.md` and `.pitboss/` untouched.
 pub fn implementer(_plan: &Plan, deferred: &DeferredDoc, current: &Phase) -> String {
     render(
         IMPLEMENTER_TEMPLATE,
@@ -91,7 +91,7 @@ pub fn fixer(_plan: &Plan, current: &Phase, test_output: &str) -> String {
 /// Render the planner prompt. `goal` is the user's free-form description of
 /// what they want built; `repo_summary` is a short overview of the existing
 /// repo layout (top-level files, package manifests, key READMEs) that
-/// `foreman plan` collects before dispatching the agent.
+/// `pitboss plan` collects before dispatching the agent.
 pub fn planner(goal: &str, repo_summary: &str) -> String {
     render(
         PLANNER_TEMPLATE,
@@ -314,7 +314,7 @@ mod tests {
         assert!(out.contains("### From phase 07: rework agent trait"));
         // Hard rules present.
         assert!(out.contains("Never edit `plan.md`"));
-        assert!(out.contains(".foreman/"));
+        assert!(out.contains(".pitboss/"));
         // No unsubstituted placeholders left.
         assert!(!out.contains("{phase_id}"));
         assert!(!out.contains("{deferred}"));

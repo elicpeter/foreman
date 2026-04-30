@@ -1,24 +1,24 @@
 <div align="center">
 
-  <img src="assets/foreman-wordmark.svg" alt="nyx" height="110"/>
+  <img src="assets/pitboss-wordmark.svg" alt="nyx" height="110"/>
 
 
-**A coding-agent foreman.** Hand it a phased plan, walk away, come back to a branch full of green commits.
+**A coding-agent pitboss.** Hand it a phased plan, walk away, come back to a branch full of green commits.
 
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-007EC6)](#license)
 [![Agent](https://img.shields.io/badge/agent-Claude%20Code-D97757)](https://docs.anthropic.com)
-[![CI](https://github.com/elicpeter/foreman/actions/workflows/ci.yml/badge.svg)](https://github.com/elicpeter/foreman/actions/workflows/ci.yml)
+[![CI](https://github.com/elicpeter/pitboss/actions/workflows/ci.yml/badge.svg)](https://github.com/elicpeter/pitboss/actions/workflows/ci.yml)
 
 </div>
 
-Foreman is a Rust CLI that drives a coding agent (Claude Code today, others pluggable) through a multi-phase implementation plan. It runs your test suite after every phase, retries failures with a fixer agent, audits the diff, lands a commit, then moves on. Bounded retries everywhere. Token and dollar budgets. A live TUI if you want to watch.
+Pitboss is a Rust CLI that drives a coding agent (Claude Code today, others pluggable) through a multi-phase implementation plan. It runs your test suite after every phase, retries failures with a fixer agent, audits the diff, lands a commit, then moves on. Bounded retries everywhere. Token and dollar budgets. A live TUI if you want to watch.
 
 <div align="center">
-  <img src="assets/foreman-tui.png" alt="foreman run --tui dashboard" width="900"/>
+  <img src="assets/pitboss-tui.png" alt="pitboss run --tui dashboard" width="900"/>
 </div>
 <div align="center">
-  <sub align="center"><i>`foreman run --tui`. The dashboard. Phases on the left, live agent output on the right.</i></sub>
+  <sub align="center"><i>`pitboss run --tui`. The dashboard. Phases on the left, live agent output on the right.</i></sub>
 </div>
 
 ## Contents
@@ -43,7 +43,7 @@ Three files do the work.
 |------|-------|----------|
 | `plan.md` | you | The phases. Read-only to agents. |
 | `deferred.md` | the agent | Anything the agent couldn't finish in a phase. Swept between phases. |
-| `.foreman/state.json` | foreman | Run id, branch, attempts, token usage. |
+| `.pitboss/state.json` | pitboss | Run id, branch, attempts, token usage. |
 
 Each phase becomes its own commit on a per-run branch, optionally rolled into a pull request when the run finishes.
 
@@ -53,7 +53,7 @@ A recent stable Rust toolchain is the only build requirement.
 
 ```sh
 git clone <this repo>
-cd foreman
+cd pitboss
 cargo install --path .
 ```
 
@@ -68,26 +68,26 @@ To actually drive the agent you also need:
 ```sh
 mkdir my-project && cd my-project
 git init
-foreman init                # scaffold plan.md, deferred.md, foreman.toml, .foreman/
+pitboss init                # scaffold plan.md, deferred.md, pitboss.toml, .pitboss/
 $EDITOR plan.md             # describe the work, phase by phase
-foreman run --dry-run       # exercise the runner without spending tokens
-foreman run                 # let the agent loop drive the plan
-foreman status              # check progress at any time
+pitboss run --dry-run       # exercise the runner without spending tokens
+pitboss run                 # let the agent loop drive the plan
+pitboss status              # check progress at any time
 ```
 
-`foreman status` looks like this:
+`pitboss status` looks like this:
 
 <div align="center">
-  <img src="assets/foreman-status.png" alt="foreman status output" width="700"/>
+  <img src="assets/pitboss-status.png" alt="pitboss status output" width="700"/>
 </div>
 
 A few entry points worth knowing:
 
-- `foreman plan "build a CLI todo app in Rust"` invokes the planner agent to draft `plan.md` for you.
-- `foreman run --tui` swaps the stderr logger for the dashboard above.
-- `foreman run --pr` (or `git.create_pr = true`) opens a pull request with `gh pr create` after the run finishes.
-- `foreman resume` picks up where a halted run left off.
-- `foreman abort --checkout-original` marks the run aborted and switches HEAD back to the branch you were on before `foreman run`.
+- `pitboss plan "build a CLI todo app in Rust"` invokes the planner agent to draft `plan.md` for you.
+- `pitboss run --tui` swaps the stderr logger for the dashboard above.
+- `pitboss run --pr` (or `git.create_pr = true`) opens a pull request with `gh pr create` after the run finishes.
+- `pitboss resume` picks up where a halted run left off.
+- `pitboss abort --checkout-original` marks the run aborted and switches HEAD back to the branch you were on before `pitboss run`.
 
 ## The run loop
 
@@ -99,21 +99,21 @@ For each phase in `plan.md`:
 4. Re-parse `deferred.md`. On parse failure, restore the snapshot and halt.
 5. Run the project test suite. If it fails, dispatch the **fixer** agent up to `retries.fixer_max_attempts` times.
 6. Stage the diff and dispatch the **auditor** agent (when `audit.enabled = true`). The auditor inlines small fixes and records anything larger in `deferred.md`. Tests run again post-audit.
-7. Commit the staged diff to the per-run branch as `[foreman] phase <id>: <title>`. `plan.md`, `deferred.md`, and `.foreman/` are excluded from the commit.
+7. Commit the staged diff to the per-run branch as `[pitboss] phase <id>: <title>`. `plan.md`, `deferred.md`, and `.pitboss/` are excluded from the commit.
 8. Sweep checked-off deferred items, advance `current_phase` in `plan.md`, persist `state.json`, move on.
 
-Every retry is bounded. When a budget is exhausted the runner halts with a clear reason and `foreman resume` picks up from the same phase.
+Every retry is bounded. When a budget is exhausted the runner halts with a clear reason and `pitboss resume` picks up from the same phase.
 
 <div align="center">
-  <img src="assets/foreman-halt.png" alt="foreman TUI halted on budget exceeded" width="900"/>
+  <img src="assets/pitboss-halt.png" alt="pitboss TUI halted on budget exceeded" width="900"/>
 </div>
 <div align="center">
-  <sub align="center"><i>USD budget tripped mid-phase. Foreman halts, no commit lands, `foreman resume` picks up from phase 02.</i></sub>
+  <sub align="center"><i>USD budget tripped mid-phase. Pitboss halts, no commit lands, `pitboss resume` picks up from phase 02.</i></sub>
 </div>
 
 ## Configuration
 
-Foreman reads `foreman.toml` from the workspace root. Every section is optional, missing keys fall back to defaults. Unknown keys load with a warning so a config written by a newer foreman still works.
+Pitboss reads `pitboss.toml` from the workspace root. Every section is optional, missing keys fall back to defaults. Unknown keys load with a warning so a config written by a newer pitboss still works.
 
 ```toml
 # Per-role model selection. Strings pass verbatim to the agent (e.g.
@@ -136,8 +136,8 @@ small_fix_line_limit = 30   # line threshold separating "inline" from "defer"
 
 # Per-run branch and optional PR.
 [git]
-branch_prefix = "foreman/run-"   # full branch is <prefix><utc_timestamp>
-create_pr     = false            # equivalent to `foreman run --pr`
+branch_prefix = "pitboss/run-"   # full branch is <prefix><utc_timestamp>
+create_pr     = false            # equivalent to `pitboss run --pr`
 
 # Test runner override. Leave commented to auto-detect.
 # [tests]
@@ -167,7 +167,7 @@ The defaults set every role to the latest Opus, which is fine if you don't want 
 | `auditor`     | `claude-sonnet-4-6`  | Diff review and short-form notes. Sonnet handles it. |
 | `fixer`       | `claude-sonnet-4-6`  | Test fix-ups are usually small and local.            |
 
-Configure pricing for any model you reference in `[models]` so `foreman status` and the USD budget check produce accurate numbers.
+Configure pricing for any model you reference in `[models]` so `pitboss status` and the USD budget check produce accurate numbers.
 
 ## Test runner detection
 
@@ -182,28 +182,28 @@ Unrecognized layouts skip the test step. The runner then advances on a passing i
 
 ## Dry runs and verbose output
 
-`foreman run --dry-run` swaps the configured agent for a deterministic no-op and skips test execution. Use it to sanity-check that:
+`pitboss run --dry-run` swaps the configured agent for a deterministic no-op and skips test execution. Use it to sanity-check that:
 
 - `plan.md` parses and `current_phase` resolves to a real heading.
-- `foreman.toml` parses cleanly with the keys you expect.
+- `pitboss.toml` parses cleanly with the keys you expect.
 - The per-run branch is created and checked out without touching `main`.
 - The event stream and TUI / logger render correctly.
 
 Dry-run advances through every phase, attempts the per-phase commit (which no-ops because nothing was staged), and finishes without any model spend. The post-run PR step is suppressed in dry-run mode regardless of `--pr` / `git.create_pr` so a no-op branch never accidentally opens a PR.
 
-`foreman -v <command>` lowers the log filter to `debug`. `-vv` lowers it to `trace`. `FOREMAN_LOG` and `RUST_LOG` still take precedence when set, so per-process tuning works without touching the flag.
+`pitboss -v <command>` lowers the log filter to `debug`. `-vv` lowers it to `trace`. `PITBOSS_LOG` and `RUST_LOG` still take precedence when set, so per-process tuning works without touching the flag.
 
 ## Workspace layout
 
-After `foreman init`:
+After `pitboss init`:
 
 ```
 your-project/
 ├── plan.md              # source of truth for the work
 ├── deferred.md          # agent-writable, swept between phases
-├── foreman.toml         # config
-├── .gitignore           # foreman appends `.foreman/` if missing
-└── .foreman/
+├── pitboss.toml         # config
+├── .gitignore           # pitboss appends `.pitboss/` if missing
+└── .pitboss/
     ├── state.json       # runner-managed, ignored by git
     ├── snapshots/       # pre-agent snapshots of plan.md and deferred.md
     └── logs/            # per-phase, per-attempt agent and test logs
@@ -216,46 +216,46 @@ your-project/
 <details>
 <summary><code>run halted at phase NN: plan.md was modified by the agent</code></summary>
 
-The agent wrote to `plan.md`. Foreman restored the file from snapshot, your plan is intact. Re-read the phase prompt: it likely needs sharper guard rails about not editing planning artifacts. `foreman resume` retries the same phase.
+The agent wrote to `plan.md`. Pitboss restored the file from snapshot, your plan is intact. Re-read the phase prompt: it likely needs sharper guard rails about not editing planning artifacts. `pitboss resume` retries the same phase.
 </details>
 
 <details>
 <summary><code>run halted at phase NN: deferred.md is invalid: ...</code></summary>
 
-The agent wrote a malformed `deferred.md`. Foreman restored from snapshot. The error message includes a 1-based line number. Check the agent's log under `.foreman/logs/phase-<id>-implementer-<n>.log` to see what it tried to write.
+The agent wrote a malformed `deferred.md`. Pitboss restored from snapshot. The error message includes a 1-based line number. Check the agent's log under `.pitboss/logs/phase-<id>-implementer-<n>.log` to see what it tried to write.
 </details>
 
 <details>
 <summary><code>run halted at phase NN: tests failed: ...</code></summary>
 
-The implementer plus fixer dispatches together couldn't get the suite green within the configured budget. The summary includes the trailing lines of the test log; the full transcript is at `.foreman/logs/phase-<id>-tests-<n>.log`. Either bump `retries.fixer_max_attempts`, fix the failing test by hand, or rework the phase.
+The implementer plus fixer dispatches together couldn't get the suite green within the configured budget. The summary includes the trailing lines of the test log; the full transcript is at `.pitboss/logs/phase-<id>-tests-<n>.log`. Either bump `retries.fixer_max_attempts`, fix the failing test by hand, or rework the phase.
 </details>
 
 <details>
 <summary><code>run halted at phase NN: budget exceeded: ...</code></summary>
 
-`max_total_tokens` or `max_total_usd` was hit before the next dispatch. `foreman status` shows the running totals and per-role breakdown. Raise the cap (or clear it) and `foreman resume`.
+`max_total_tokens` or `max_total_usd` was hit before the next dispatch. `pitboss status` shows the running totals and per-role breakdown. Raise the cap (or clear it) and `pitboss resume`.
 </details>
 
 <details>
-<summary><code>state.json marks run X as aborted; remove .foreman/state.json to start over</code></summary>
+<summary><code>state.json marks run X as aborted; remove .pitboss/state.json to start over</code></summary>
 
-A previous run was aborted with `foreman abort`. Foreman keeps the state file as a breadcrumb. Delete `.foreman/state.json` to start fresh. Everything else (plan, deferred, branch, commits) is preserved.
+A previous run was aborted with `pitboss abort`. Pitboss keeps the state file as a breadcrumb. Delete `.pitboss/state.json` to start fresh. Everything else (plan, deferred, branch, commits) is preserved.
 </details>
 
 <details>
-<summary><code>no run to resume: .foreman/state.json is empty</code></summary>
+<summary><code>no run to resume: .pitboss/state.json is empty</code></summary>
 
-You called `foreman resume` on a workspace where no run has started. Use `foreman run` instead.
+You called `pitboss resume` on a workspace where no run has started. Use `pitboss run` instead.
 </details>
 
 <details>
 <summary><code>creating per-run branch ... (workspace must already be a git repo)</code></summary>
 
-The workspace isn't a git repo. `git init` it first. Foreman won't, on purpose.
+The workspace isn't a git repo. `git init` it first. Pitboss won't, on purpose.
 </details>
 
-`foreman --version` prints the foreman crate version. Useful when filing issues.
+`pitboss --version` prints the pitboss crate version. Useful when filing issues.
 
 ## Examples
 
@@ -270,7 +270,7 @@ src/
 ├── plan/            Plan/Phase types, parser, snapshot
 ├── deferred/        DeferredDoc/items/phases, parser
 ├── state/           RunState, atomic IO
-├── config/          foreman.toml schema and loader
+├── config/          pitboss.toml schema and loader
 ├── agent/           Agent trait, request/outcome, subprocess utils
 │   ├── claude_code.rs
 │   └── dry_run.rs

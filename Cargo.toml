@@ -1,12 +1,12 @@
 [package]
-name = "foreman"
+name = "pitboss"
 version = "0.1.0"
 edition = "2021"
 description = "CLI that orchestrates coding agents (Claude Code and others) through a phased implementation plan, with automatic test/commit loops and a TUI dashboard"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/elicpeter/foreman"
-homepage = "https://github.com/elicpeter/foreman"
-documentation = "https://docs.rs/foreman"
+repository = "https://github.com/elicpeter/pitboss"
+homepage = "https://github.com/elicpeter/pitboss"
+documentation = "https://docs.rs/pitboss"
 readme = "README.md"
 keywords = ["ai", "agent", "cli", "automation", "claude"]
 categories = ["command-line-utilities", "development-tools"]
@@ -20,7 +20,7 @@ include = [
 ]
 
 [[bin]]
-name = "foreman"
+name = "pitboss"
 path = "src/main.rs"
 
 [dependencies]

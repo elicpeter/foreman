@@ -3,7 +3,7 @@ source: src/tui/app.rs
 assertion_line: 600
 expression: snap
 ---
-foreman  run 20260430T120000Z  branch foreman/run-20260430T120000Z                                                      
+pitboss  run 20260430T120000Z  branch pitboss/run-20260430T120000Z                                                      
 phase 02 — Domain types   [implementer]                                                                                 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ┌ phases (1/3) ────────────────────────────────┐┌ agent output ────────────────────────────────────────────────────────┐

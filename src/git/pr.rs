@@ -1,4 +1,4 @@
-//! Auto-generated pull-request title and body for `foreman run --pr`.
+//! Auto-generated pull-request title and body for `pitboss run --pr`.
 //!
 //! After a run finishes successfully, the runner hands the loaded [`Plan`],
 //! the final [`RunState`], and the current [`DeferredDoc`] to [`pr_body`] /
@@ -30,15 +30,15 @@ pub struct PrSummary<'a> {
 
 /// One-line PR title summarizing the run's scope.
 ///
-/// Format: `foreman: <N> phase(s) — <first title> … <last title>`. The single
+/// Format: `pitboss: <N> phase(s) — <first title> … <last title>`. The single
 /// quote keeps the title under GitHub's 256-char limit even on long plans;
 /// reviewers get a quick "what scope did this PR cover" read at the top of
 /// the issues list. A run that committed zero phases (only excluded paths
-/// touched) collapses to `foreman: no phases committed`.
+/// touched) collapses to `pitboss: no phases committed`.
 pub fn pr_title(summary: &PrSummary<'_>) -> String {
     let count = summary.state.completed.len();
     if count == 0 {
-        return "foreman: no phases committed".to_string();
+        return "pitboss: no phases committed".to_string();
     }
     let first_id = &summary.state.completed[0];
     let last_id = &summary.state.completed[count - 1];
@@ -48,14 +48,14 @@ pub fn pr_title(summary: &PrSummary<'_>) -> String {
         .map(|p| p.title.as_str())
         .unwrap_or("(unknown)");
     if count == 1 {
-        return format!("foreman: phase {first_id} — {first_title}");
+        return format!("pitboss: phase {first_id} — {first_title}");
     }
     let last_title = summary
         .plan
         .phase(last_id)
         .map(|p| p.title.as_str())
         .unwrap_or("(unknown)");
-    format!("foreman: {count} phases ({first_id}–{last_id}) — {first_title} … {last_title}")
+    format!("pitboss: {count} phases ({first_id}–{last_id}) — {first_title} … {last_title}")
 }
 
 /// Multi-section markdown PR body. Sections are emitted in this order:
@@ -186,7 +186,7 @@ mod tests {
         );
         RunState {
             run_id: "20260429T143022Z".into(),
-            branch: "foreman/run-20260429T143022Z".into(),
+            branch: "pitboss/run-20260429T143022Z".into(),
             original_branch: Some("main".into()),
             started_at: DateTime::parse_from_rfc3339("2026-04-29T14:30:22Z")
                 .unwrap()
@@ -213,7 +213,7 @@ mod tests {
             state: &state,
             deferred: &deferred,
         };
-        assert_eq!(pr_title(&summary), "foreman: no phases committed");
+        assert_eq!(pr_title(&summary), "pitboss: no phases committed");
     }
 
     #[test]
@@ -226,7 +226,7 @@ mod tests {
             state: &state,
             deferred: &deferred,
         };
-        assert_eq!(pr_title(&summary), "foreman: phase 02 — Domain types");
+        assert_eq!(pr_title(&summary), "pitboss: phase 02 — Domain types");
     }
 
     #[test]
@@ -241,7 +241,7 @@ mod tests {
         };
         assert_eq!(
             pr_title(&summary),
-            "foreman: 3 phases (01–03) — Foundation … Plan parser"
+            "pitboss: 3 phases (01–03) — Foundation … Plan parser"
         );
     }
 
@@ -262,7 +262,7 @@ mod tests {
             "body: {body}"
         );
         assert!(
-            body.contains("- branch: `foreman/run-20260429T143022Z`"),
+            body.contains("- branch: `pitboss/run-20260429T143022Z`"),
             "body: {body}"
         );
         assert!(body.contains("- original branch: `main`"), "body: {body}");

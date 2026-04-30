@@ -1,8 +1,8 @@
-//! `foreman plan <goal>` — invoke the planner agent to scaffold a `plan.md`.
+//! `pitboss plan <goal>` — invoke the planner agent to scaffold a `plan.md`.
 //!
 //! Phase 15 wires the planner role end to end:
 //!
-//! 1. The CLI loads `foreman.toml` to pick the planner model.
+//! 1. The CLI loads `pitboss.toml` to pick the planner model.
 //! 2. A short repo overview is collected (top-level entries, package
 //!    manifests, top-level READMEs) and threaded into [`prompts::planner`].
 //! 3. The configured [`Agent`] is dispatched once. `Stdout` events are
@@ -14,7 +14,7 @@
 //!    hard error.
 //!
 //! `plan.md` is never overwritten silently — `--force` is required when a
-//! file already exists. `foreman init` writes a placeholder `plan.md`, so the
+//! file already exists. `pitboss init` writes a placeholder `plan.md`, so the
 //! flag is the normal escape hatch when generating a real plan over the seed.
 
 use std::fs;
@@ -33,11 +33,11 @@ use crate::prompts;
 use crate::util::write_atomic;
 
 /// Wall-clock cap for a single planner dispatch. The planner runs once per
-/// `foreman plan` invocation (twice on the parse-failure retry path) so a
+/// `pitboss plan` invocation (twice on the parse-failure retry path) so a
 /// generous ceiling is fine; phase 18 makes timeouts configurable.
 const PLANNER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// Maximum number of agent dispatches allowed for a single `foreman plan`
+/// Maximum number of agent dispatches allowed for a single `pitboss plan`
 /// invocation. The first attempt uses the canonical prompt; if its output
 /// fails to parse, the second attempt prepends the parser diagnostic. A
 /// second parse failure is surfaced as an error.
@@ -198,13 +198,13 @@ fn prepend_retry_context(base: &str, err: &str) -> String {
 
 fn planner_log_path(workspace: &Path, attempt: u32) -> PathBuf {
     workspace
-        .join(".foreman")
+        .join(".pitboss")
         .join("logs")
         .join(format!("planner-attempt-{attempt}.log"))
 }
 
 fn ensure_logs_dir(workspace: &Path) -> Result<()> {
-    let logs = workspace.join(".foreman").join("logs");
+    let logs = workspace.join(".pitboss").join("logs");
     fs::create_dir_all(&logs).with_context(|| format!("plan: creating {}", logs.display()))?;
     Ok(())
 }
@@ -218,7 +218,7 @@ const PER_FILE_CHAR_CAP: usize = 4_000;
 /// Directories never worth showing the planner — purely build / VCS / agent
 /// state.
 const SKIP_DIRS: &[&str] = &[
-    ".foreman",
+    ".pitboss",
     ".git",
     ".hg",
     ".svn",
@@ -374,7 +374,7 @@ mod tests {
 current_phase: \"01\"
 ---
 
-# Foreman Plan
+# Pitboss Plan
 
 # Phase 01: First
 
@@ -497,21 +497,21 @@ current_phase: \"01\"
     }
 
     #[tokio::test]
-    async fn writes_per_attempt_log_paths_under_dot_foreman() {
-        // The runner pre-creates `.foreman/logs/`. After a single attempt the
+    async fn writes_per_attempt_log_paths_under_dot_pitboss() {
+        // The runner pre-creates `.pitboss/logs/`. After a single attempt the
         // dir exists even if the agent didn't write the log itself (DryRun).
         let dir = tempdir().unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
         let _ = run_with_agent(dir.path(), "g", false, &agent)
             .await
             .unwrap();
-        assert!(dir.path().join(".foreman/logs").is_dir());
+        assert!(dir.path().join(".pitboss/logs").is_dir());
     }
 
     #[test]
     fn top_level_listing_filters_skip_dirs_and_hidden() {
         let dir = tempdir().unwrap();
-        fs::create_dir(dir.path().join(".foreman")).unwrap();
+        fs::create_dir(dir.path().join(".pitboss")).unwrap();
         fs::create_dir(dir.path().join("target")).unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
@@ -523,7 +523,7 @@ current_phase: \"01\"
         assert!(listing.contains("src/"));
         assert!(listing.contains(".gitignore"));
         assert!(!listing.contains("target"));
-        assert!(!listing.contains(".foreman"));
+        assert!(!listing.contains(".pitboss"));
         assert!(!listing.contains(".env"));
     }
 

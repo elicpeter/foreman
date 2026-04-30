@@ -1,9 +1,9 @@
-//! Integration tests for `foreman status`, `foreman resume`, and
-//! `foreman abort` (phase 17).
+//! Integration tests for `pitboss status`, `pitboss resume`, and
+//! `pitboss abort` (phase 17).
 //!
 //! These exercise the binary via `assert_cmd` against a temp workspace so the
 //! full clap-dispatch path runs. Tests that require a halted run pre-populate
-//! `.foreman/state.json` directly rather than driving the runner — driving the
+//! `.pitboss/state.json` directly rather than driving the runner — driving the
 //! runner via the CLI requires a real `claude` binary, which CI doesn't have.
 
 #![cfg(unix)]
@@ -18,12 +18,12 @@ use predicates::str::contains;
 use serde_json::json;
 use tempfile::tempdir;
 
-fn foreman() -> Command {
-    Command::cargo_bin("foreman").expect("foreman binary should be built")
+fn pitboss() -> Command {
+    Command::cargo_bin("pitboss").expect("pitboss binary should be built")
 }
 
 fn init_workspace(dir: &Path) {
-    foreman().arg("init").current_dir(dir).assert().success();
+    pitboss().arg("init").current_dir(dir).assert().success();
 }
 
 fn init_git_repo(dir: &Path) {
@@ -34,8 +34,8 @@ fn init_git_repo(dir: &Path) {
         .unwrap();
     assert!(status.success());
     for (k, v) in [
-        ("user.name", "foreman-test"),
-        ("user.email", "foreman@test"),
+        ("user.name", "pitboss-test"),
+        ("user.email", "pitboss@test"),
     ] {
         PCommand::new("git")
             .args(["-C"])
@@ -53,7 +53,7 @@ fn init_git_repo(dir: &Path) {
     assert!(status.success());
 }
 
-/// Write a `.foreman/state.json` directly. Mirrors what `foreman run` would
+/// Write a `.pitboss/state.json` directly. Mirrors what `pitboss run` would
 /// have persisted after a halt.
 fn write_state(
     dir: &Path,
@@ -76,7 +76,7 @@ fn write_state(
         "token_usage": {"input": 0, "output": 0, "by_role": {}},
         "aborted": aborted,
     });
-    let path = dir.join(".foreman/state.json");
+    let path = dir.join(".pitboss/state.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, serde_json::to_string_pretty(&state).unwrap() + "\n").unwrap();
 }
@@ -86,7 +86,7 @@ fn status_with_no_run_says_not_started() {
     let dir = tempdir().unwrap();
     init_workspace(dir.path());
 
-    foreman()
+    pitboss()
         .arg("status")
         .current_dir(dir.path())
         .assert()
@@ -102,19 +102,19 @@ fn status_after_state_seeded_shows_run_metadata() {
     init_workspace(dir.path());
     write_state(
         dir.path(),
-        "foreman/run-20260429T143022Z",
+        "pitboss/run-20260429T143022Z",
         Some("main"),
         &[],
         false,
     );
 
-    foreman()
+    pitboss()
         .arg("status")
         .current_dir(dir.path())
         .assert()
         .success()
         .stdout(contains("run: 20260429T143022Z"))
-        .stdout(contains("branch: foreman/run-20260429T143022Z"))
+        .stdout(contains("branch: pitboss/run-20260429T143022Z"))
         .stdout(contains("original branch: main"))
         .stdout(contains("completed: (none)"))
         .stdout(contains("deferred items: 0"))
@@ -127,13 +127,13 @@ fn status_marks_aborted_run() {
     init_workspace(dir.path());
     write_state(
         dir.path(),
-        "foreman/run-20260429T143022Z",
+        "pitboss/run-20260429T143022Z",
         Some("main"),
         &[],
         true,
     );
 
-    foreman()
+    pitboss()
         .arg("status")
         .current_dir(dir.path())
         .assert()
@@ -146,7 +146,7 @@ fn resume_with_no_state_errors_clearly() {
     let dir = tempdir().unwrap();
     init_workspace(dir.path());
 
-    foreman()
+    pitboss()
         .arg("resume")
         .current_dir(dir.path())
         .assert()
@@ -161,13 +161,13 @@ fn resume_with_aborted_state_refuses() {
     init_git_repo(dir.path());
     write_state(
         dir.path(),
-        "foreman/run-20260429T143022Z",
+        "pitboss/run-20260429T143022Z",
         Some("main"),
         &[],
         true,
     );
 
-    foreman()
+    pitboss()
         .arg("resume")
         .current_dir(dir.path())
         .assert()
@@ -180,7 +180,7 @@ fn abort_with_no_state_errors() {
     let dir = tempdir().unwrap();
     init_workspace(dir.path());
 
-    foreman()
+    pitboss()
         .arg("abort")
         .current_dir(dir.path())
         .assert()
@@ -196,7 +196,7 @@ fn abort_marks_state_aborted_and_persists_flag() {
     // Pretend a run was previously started and halted.
     write_state(
         dir.path(),
-        "foreman/run-20260429T143022Z",
+        "pitboss/run-20260429T143022Z",
         Some("main"),
         &["01"],
         false,
@@ -207,11 +207,11 @@ fn abort_marks_state_aborted_and_persists_flag() {
     PCommand::new("git")
         .args(["-C"])
         .arg(dir.path())
-        .args(["branch", "foreman/run-20260429T143022Z"])
+        .args(["branch", "pitboss/run-20260429T143022Z"])
         .status()
         .unwrap();
 
-    foreman()
+    pitboss()
         .arg("abort")
         .current_dir(dir.path())
         .assert()
@@ -219,14 +219,14 @@ fn abort_marks_state_aborted_and_persists_flag() {
         .stdout(contains("aborted run 20260429T143022Z"));
 
     // The state file now has aborted=true.
-    let state_text = fs::read_to_string(dir.path().join(".foreman/state.json")).unwrap();
+    let state_text = fs::read_to_string(dir.path().join(".pitboss/state.json")).unwrap();
     assert!(
         state_text.contains("\"aborted\": true"),
         "state.json after abort: {state_text}"
     );
 
-    // A subsequent `foreman run` refuses on the aborted state.
-    foreman()
+    // A subsequent `pitboss run` refuses on the aborted state.
+    pitboss()
         .arg("run")
         .current_dir(dir.path())
         .assert()
@@ -240,13 +240,13 @@ fn abort_idempotent_second_call_is_a_noop_success() {
     init_workspace(dir.path());
     write_state(
         dir.path(),
-        "foreman/run-20260429T143022Z",
+        "pitboss/run-20260429T143022Z",
         Some("main"),
         &[],
         true,
     );
 
-    foreman()
+    pitboss()
         .arg("abort")
         .current_dir(dir.path())
         .assert()
@@ -275,9 +275,9 @@ fn abort_with_checkout_original_switches_branch() {
     .to_string();
     assert!(!original.is_empty(), "test setup: empty initial branch");
 
-    // Create the per-run branch and switch onto it (mirrors what `foreman run`
+    // Create the per-run branch and switch onto it (mirrors what `pitboss run`
     // would have done before a halt).
-    let run_branch = "foreman/run-20260429T143022Z";
+    let run_branch = "pitboss/run-20260429T143022Z";
     PCommand::new("git")
         .args(["-C"])
         .arg(dir.path())
@@ -292,7 +292,7 @@ fn abort_with_checkout_original_switches_branch() {
         .unwrap();
     write_state(dir.path(), run_branch, Some(&original), &[], false);
 
-    foreman()
+    pitboss()
         .arg("abort")
         .arg("--checkout-original")
         .current_dir(dir.path())
@@ -323,9 +323,9 @@ fn abort_with_checkout_original_errors_when_no_original_recorded() {
     init_workspace(dir.path());
     init_git_repo(dir.path());
     // No original_branch in the seeded state.
-    write_state(dir.path(), "foreman/run-x", None, &[], false);
+    write_state(dir.path(), "pitboss/run-x", None, &[], false);
 
-    foreman()
+    pitboss()
         .arg("abort")
         .arg("--checkout-original")
         .current_dir(dir.path())

@@ -4,14 +4,14 @@
 //!
 //! ## How to install / configure `claude`
 //!
-//! Foreman shells out to whatever `claude` binary is on `PATH` (or the path
+//! Pitboss shells out to whatever `claude` binary is on `PATH` (or the path
 //! you pass to [`ClaudeCodeAgent::with_binary`]). Install per Anthropic's
 //! Claude Code docs and authenticate (`claude auth login`) before running
-//! foreman. To verify the install, run `claude -p "hello" --output-format
-//! stream-json --verbose --model haiku` from a shell — foreman invokes the
+//! pitboss. To verify the install, run `claude -p "hello" --output-format
+//! stream-json --verbose --model haiku` from a shell — pitboss invokes the
 //! binary with the same flag set.
 //!
-//! Foreman runs the agent under `--permission-mode auto` for safe unattended
+//! Pitboss runs the agent under `--permission-mode auto` for safe unattended
 //! orchestration. If you want a different mode, construct the agent with
 //! [`ClaudeCodeAgent::with_permission_mode`].
 //!
@@ -604,11 +604,11 @@ mod tests {
     }
 
     /// Real end-to-end test against the actual `claude` binary on PATH.
-    /// Skipped unless `FOREMAN_REAL_AGENT_TESTS=1` so CI doesn't burn tokens.
+    /// Skipped unless `PITBOSS_REAL_AGENT_TESTS=1` so CI doesn't burn tokens.
     #[tokio::test]
     async fn real_claude_smoke_test() {
-        if std::env::var("FOREMAN_REAL_AGENT_TESTS").ok().as_deref() != Some("1") {
-            eprintln!("skipping real_claude_smoke_test (set FOREMAN_REAL_AGENT_TESTS=1 to run)");
+        if std::env::var("PITBOSS_REAL_AGENT_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping real_claude_smoke_test (set PITBOSS_REAL_AGENT_TESTS=1 to run)");
             return;
         }
         let dir = tempfile::tempdir().unwrap();

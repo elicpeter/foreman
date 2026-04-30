@@ -5,7 +5,7 @@
 //! process's current directory.
 //!
 //! Commit operations supply an inline `user.name` / `user.email` via `-c`
-//! flags so foreman never depends on global git config — runs are reproducible
+//! flags so pitboss never depends on global git config — runs are reproducible
 //! on hosts that have never seen a `~/.gitconfig`.
 
 use std::path::{Path, PathBuf};
@@ -172,7 +172,7 @@ impl Git for ShellGit {
 
     async fn commit(&self, message: &str) -> Result<CommitId> {
         let mut cmd = self.cmd();
-        cmd.args(["-c", "user.name=foreman", "-c", "user.email=foreman@local"])
+        cmd.args(["-c", "user.name=pitboss", "-c", "user.email=pitboss@local"])
             .arg("commit")
             .arg("-m")
             .arg(message);
@@ -310,8 +310,8 @@ mod tests {
         assert!(status.success());
         // Identity for the seed commit.
         for (k, v) in [
-            ("user.name", "foreman-test"),
-            ("user.email", "foreman@test"),
+            ("user.name", "pitboss-test"),
+            ("user.email", "pitboss@test"),
         ] {
             std::process::Command::new("git")
                 .args(["-C"])
@@ -358,12 +358,12 @@ mod tests {
         let git = ShellGit::new(dir.path());
         let starting = git.current_branch().await.unwrap();
 
-        git.create_branch("foreman/run-test").await.unwrap();
+        git.create_branch("pitboss/run-test").await.unwrap();
         // create_branch must not switch.
         assert_eq!(git.current_branch().await.unwrap(), starting);
 
-        git.checkout("foreman/run-test").await.unwrap();
-        assert_eq!(git.current_branch().await.unwrap(), "foreman/run-test");
+        git.checkout("pitboss/run-test").await.unwrap();
+        assert_eq!(git.current_branch().await.unwrap(), "pitboss/run-test");
     }
 
     #[tokio::test]
@@ -372,19 +372,19 @@ mod tests {
         let git = ShellGit::new(dir.path());
 
         // Mirror the runner's per-phase situation: the agent left planning
-        // artifacts and `.foreman/` updates in the working tree alongside one
+        // artifacts and `.pitboss/` updates in the working tree alongside one
         // real source change. Only the source change should be staged.
         fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
         fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
-        fs::create_dir_all(dir.path().join(".foreman")).unwrap();
-        fs::write(dir.path().join(".foreman/state.json"), "{}\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
+        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
 
         let plan_path = Path::new("plan.md");
         let deferred_path = Path::new("deferred.md");
-        let foreman_path = Path::new(".foreman");
-        git.stage_changes(&[plan_path, deferred_path, foreman_path])
+        let pitboss_path = Path::new(".pitboss");
+        git.stage_changes(&[plan_path, deferred_path, pitboss_path])
             .await
             .unwrap();
 
@@ -420,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_commit_path_when_only_excluded_files_changed() {
-        // The runner contract: if the agent only modified `.foreman/`,
+        // The runner contract: if the agent only modified `.pitboss/`,
         // `plan.md`, or `deferred.md`, `stage_changes` finds nothing to stage
         // and `has_staged_changes` returns false. Runner skips commit.
         let dir = fresh_repo().await;
@@ -428,13 +428,13 @@ mod tests {
 
         fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
         fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
-        fs::create_dir_all(dir.path().join(".foreman")).unwrap();
-        fs::write(dir.path().join(".foreman/state.json"), "{}\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
+        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
 
         git.stage_changes(&[
             Path::new("plan.md"),
             Path::new("deferred.md"),
-            Path::new(".foreman"),
+            Path::new(".pitboss"),
         ])
         .await
         .unwrap();
@@ -454,7 +454,7 @@ mod tests {
         fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
         git.stage_changes(&[]).await.unwrap();
 
-        let id = git.commit("[foreman] phase 01: seed").await.unwrap();
+        let id = git.commit("[pitboss] phase 01: seed").await.unwrap();
         assert_eq!(id.as_str().len(), 40, "commit id: {id}");
 
         // The id resolves to the same commit `git rev-parse` returns.
@@ -472,7 +472,7 @@ mod tests {
     async fn commit_with_empty_index_errors() {
         let dir = fresh_repo().await;
         let git = ShellGit::new(dir.path());
-        let err = git.commit("[foreman] empty").await.unwrap_err();
+        let err = git.commit("[pitboss] empty").await.unwrap_err();
         let chain = format!("{err:#}");
         assert!(chain.contains("commit"), "err chain: {chain}");
     }
@@ -486,12 +486,12 @@ mod tests {
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/foo.rs"), "a\nb\nc\n").unwrap();
         git.stage_changes(&[]).await.unwrap();
-        let from = git.commit("[foreman] phase 01: a").await.unwrap();
+        let from = git.commit("[pitboss] phase 01: a").await.unwrap();
 
         // Second commit modifying the same file.
         fs::write(dir.path().join("src/foo.rs"), "a\nB\nc\nd\n").unwrap();
         git.stage_changes(&[]).await.unwrap();
-        let to = git.commit("[foreman] phase 02: b").await.unwrap();
+        let to = git.commit("[pitboss] phase 02: b").await.unwrap();
 
         let stat = git.diff_stat(from.as_str(), to.as_str()).await.unwrap();
         assert_eq!(stat.files_changed, 1);
@@ -546,7 +546,7 @@ mod tests {
         git.stage_changes(&[
             Path::new("plan.md"),
             Path::new("deferred.md"),
-            Path::new(".foreman"),
+            Path::new(".pitboss"),
         ])
         .await
         .unwrap();
@@ -615,7 +615,7 @@ mod tests {
 
         let url = git
             .open_pr(
-                "foreman: phase 01 — Foundation",
+                "pitboss: phase 01 — Foundation",
                 "## Run\n\nbody body body\n",
             )
             .await
@@ -630,7 +630,7 @@ mod tests {
         assert!(log.contains("create"), "fake log: {log}");
         assert!(log.contains("--title"), "fake log: {log}");
         assert!(
-            log.contains("foreman: phase 01 — Foundation"),
+            log.contains("pitboss: phase 01 — Foundation"),
             "fake log: {log}"
         );
         assert!(log.contains("--body"), "fake log: {log}");

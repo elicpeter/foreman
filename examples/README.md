@@ -1,6 +1,6 @@
 # Examples
 
-Each subdirectory is a complete `plan.md` + `foreman.toml` you can drop into a fresh workspace.
+Each subdirectory is a complete `plan.md` + `pitboss.toml` you can drop into a fresh workspace.
 
 | Example | What it builds | Notes |
 | ------- | -------------- | ----- |
@@ -13,18 +13,18 @@ Each subdirectory is a complete `plan.md` + `foreman.toml` you can drop into a f
 mkdir scratch && cd scratch
 git init
 
-# Scaffold the foreman workspace
-foreman init
+# Scaffold the pitboss workspace
+pitboss init
 
 # Replace the placeholder plan with the example's plan
-cp /path/to/foreman/examples/todo-cli/plan.md plan.md
-cp /path/to/foreman/examples/todo-cli/foreman.toml foreman.toml
+cp /path/to/pitboss/examples/todo-cli/plan.md plan.md
+cp /path/to/pitboss/examples/todo-cli/pitboss.toml pitboss.toml
 
 # Sanity check — exercises the runner end-to-end with no token spend
-foreman run --dry-run
+pitboss run --dry-run
 
 # When ready, run for real
-foreman run
+pitboss run
 ```
 
-`foreman run --dry-run` is always the recommended first step on an example: it confirms the plan parses, the per-run branch creates cleanly, and the event stream renders the way you expect — without invoking the agent.
+`pitboss run --dry-run` is always the recommended first step on an example: it confirms the plan parses, the per-run branch creates cleanly, and the event stream renders the way you expect — without invoking the agent.

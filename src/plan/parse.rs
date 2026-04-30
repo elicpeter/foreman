@@ -239,10 +239,10 @@ mod tests {
     fn fixture_with_preamble_and_two_phases() -> &'static str {
         "---\n\
          current_phase: \"02\"\n\
-         project: foreman\n\
+         project: pitboss\n\
          ---\n\
          \n\
-         # Foreman\n\
+         # Pitboss\n\
          \n\
          Intro paragraph.\n\
          \n\
@@ -278,7 +278,7 @@ mod tests {
         let s = fixture_with_preamble_and_two_phases();
         let plan = parse(s).unwrap();
         assert_eq!(plan.phases.len(), 2);
-        assert_eq!(plan.preamble, "\n# Foreman\n\nIntro paragraph.\n\n");
+        assert_eq!(plan.preamble, "\n# Pitboss\n\nIntro paragraph.\n\n");
         assert_eq!(plan.phases[0].title, "Foundation");
         assert_eq!(plan.phases[1].title, "Domain types");
         assert_eq!(serialize(&plan), s);
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_current_phase() {
-        let err = parse("---\nproject: foreman\n---\n\n# Phase 01: Hi\n\nbody\n").unwrap_err();
+        let err = parse("---\nproject: pitboss\n---\n\n# Phase 01: Hi\n\nbody\n").unwrap_err();
         assert!(matches!(err, PlanParseError::BadFrontmatter(_)));
     }
 
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn unknown_frontmatter_keys_are_accepted_with_warning() {
-        let s = "---\ncurrent_phase: \"01\"\nproject: foreman\nweird_key: 42\n---\n\n# Phase 01: A\n\nbody\n";
+        let s = "---\ncurrent_phase: \"01\"\nproject: pitboss\nweird_key: 42\n---\n\n# Phase 01: A\n\nbody\n";
         let plan = parse(s).unwrap();
         assert_eq!(plan.current_phase.as_str(), "01");
         // round-trip preserves the unknown keys verbatim
@@ -383,8 +383,8 @@ mod tests {
         let new_id = PhaseId::parse("01").unwrap();
         plan.set_current_phase(new_id.clone());
         assert_eq!(plan.current_phase, new_id);
-        // Frontmatter still has project: foreman.
-        assert!(plan.frontmatter.contains("project: foreman"));
+        // Frontmatter still has project: pitboss.
+        assert!(plan.frontmatter.contains("project: pitboss"));
         assert!(plan.frontmatter.contains("current_phase: \"01\""));
         assert!(!plan.frontmatter.contains("current_phase: \"02\""));
         // Round-trips against itself after mutation.
@@ -397,7 +397,7 @@ mod tests {
     fn set_current_phase_appends_when_missing() {
         let mut plan = Plan {
             current_phase: PhaseId::parse("01").unwrap(),
-            frontmatter: "project: foreman".to_string(),
+            frontmatter: "project: pitboss".to_string(),
             preamble: String::new(),
             phases: vec![Phase {
                 id: PhaseId::parse("01").unwrap(),
@@ -406,7 +406,7 @@ mod tests {
             }],
         };
         plan.set_current_phase(PhaseId::parse("02").unwrap());
-        assert!(plan.frontmatter.contains("project: foreman"));
+        assert!(plan.frontmatter.contains("project: pitboss"));
         assert!(plan.frontmatter.contains("current_phase: \"02\""));
     }
 }

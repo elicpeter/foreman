@@ -1,12 +1,12 @@
-//! `foreman.toml` schema and loader.
+//! `pitboss.toml` schema and loader.
 //!
-//! `Config` is the typed view of the project's `foreman.toml`. Every field has
+//! `Config` is the typed view of the project's `pitboss.toml`. Every field has
 //! a sensible default, so a missing file or missing section round-trips to the
 //! same shape as a fully populated one. Unknown keys are logged via
 //! [`tracing::warn`] and otherwise ignored, so a forward-compatible config
-//! written by a newer foreman can still be loaded by an older binary.
+//! written by a newer pitboss can still be loaded by an older binary.
 //!
-//! [`load`] reads `<workspace>/foreman.toml`, returning [`Config::default()`]
+//! [`load`] reads `<workspace>/pitboss.toml`, returning [`Config::default()`]
 //! when the file is missing. [`parse`] is the same logic against an in-memory
 //! string, used by both [`load`] and the unit tests.
 //!
@@ -23,12 +23,12 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-/// Path of the workspace's configuration file (`<workspace>/foreman.toml`).
+/// Path of the workspace's configuration file (`<workspace>/pitboss.toml`).
 pub fn config_path(workspace: impl AsRef<Path>) -> PathBuf {
-    workspace.as_ref().join("foreman.toml")
+    workspace.as_ref().join("pitboss.toml")
 }
 
-/// Fully resolved foreman configuration. Every section has a [`Default`] so
+/// Fully resolved pitboss configuration. Every section has a [`Default`] so
 /// `Config::default()` is a valid runtime config.
 ///
 /// `Eq` is intentionally not derived because [`Budgets`] holds `f64` values
@@ -58,11 +58,11 @@ pub struct Config {
 /// the active agent (e.g., `claude` CLI) accepts.
 ///
 /// Every role defaults to `claude-opus-4-7`. Users wanting a cheaper
-/// implementer/fixer split can override per role in `foreman.toml`.
+/// implementer/fixer split can override per role in `pitboss.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelRoles {
-    /// Model used by `foreman plan` to generate `plan.md` from a goal.
+    /// Model used by `pitboss plan` to generate `plan.md` from a goal.
     pub planner: String,
     /// Model used for the per-phase implementation pass — the bulk of token
     /// spend for most runs.
@@ -85,7 +85,7 @@ impl Default for ModelRoles {
     }
 }
 
-/// Bounded-retry budgets. Foreman never loops indefinitely; once a budget is
+/// Bounded-retry budgets. Pitboss never loops indefinitely; once a budget is
 /// exhausted the runner halts and surfaces the failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -135,7 +135,7 @@ impl Default for AuditConfig {
 #[serde(default)]
 pub struct GitConfig {
     /// Prefix prepended to the per-run branch name. The full branch is
-    /// `<branch_prefix><utc_timestamp>` (e.g., `foreman/run-20260429T143022Z`).
+    /// `<branch_prefix><utc_timestamp>` (e.g., `pitboss/run-20260429T143022Z`).
     pub branch_prefix: String,
     /// When `true`, the runner shells out to `gh pr create` after the final
     /// phase commits. Equivalent to passing `--pr` on the CLI.
@@ -145,7 +145,7 @@ pub struct GitConfig {
 impl Default for GitConfig {
     fn default() -> Self {
         Self {
-            branch_prefix: "foreman/run-".to_string(),
+            branch_prefix: "pitboss/run-".to_string(),
             create_pr: false,
         }
     }
@@ -164,7 +164,7 @@ impl Default for GitConfig {
 /// [`ModelRoles`]. Roles whose model is missing from `pricing` contribute zero
 /// USD (and a `tracing::warn` is emitted on the first dispatch); the `tokens`
 /// budget still applies. The default pricing table covers the Claude models
-/// foreman ships defaults for; `foreman.toml` may override or extend it.
+/// pitboss ships defaults for; `pitboss.toml` may override or extend it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Budgets {
@@ -242,9 +242,9 @@ pub struct TestsConfig {
     pub command: Option<String>,
 }
 
-/// Read the workspace's `foreman.toml`.
+/// Read the workspace's `pitboss.toml`.
 ///
-/// A missing file returns [`Config::default()`] — foreman is usable without
+/// A missing file returns [`Config::default()`] — pitboss is usable without
 /// any config — but a present-but-malformed file is an error. Unknown keys
 /// emit a [`tracing::warn`] and are otherwise ignored.
 pub fn load(workspace: impl AsRef<Path>) -> Result<Config> {
@@ -259,23 +259,23 @@ pub fn load(workspace: impl AsRef<Path>) -> Result<Config> {
     parse(&text).with_context(|| format!("config::load: parsing {:?}", path))
 }
 
-/// Parse a `foreman.toml` body. Empty / whitespace-only input yields
+/// Parse a `pitboss.toml` body. Empty / whitespace-only input yields
 /// [`Config::default()`]. Unknown keys are logged at warn level.
 pub fn parse(text: &str) -> Result<Config> {
     if text.trim().is_empty() {
         return Ok(Config::default());
     }
-    let value: toml::Value = toml::from_str(text).context("foreman.toml is not valid TOML")?;
+    let value: toml::Value = toml::from_str(text).context("pitboss.toml is not valid TOML")?;
     for unknown in find_unknown_keys(&value) {
-        warn!(key = %unknown, "foreman.toml: unknown key {:?} (ignored)", unknown);
+        warn!(key = %unknown, "pitboss.toml: unknown key {:?} (ignored)", unknown);
     }
     let cfg: Config = value
         .try_into()
-        .context("foreman.toml does not match the expected schema")?;
+        .context("pitboss.toml does not match the expected schema")?;
     Ok(cfg)
 }
 
-/// Walk a parsed `foreman.toml` value and return any keys not in the schema.
+/// Walk a parsed `pitboss.toml` value and return any keys not in the schema.
 /// Returned in `section.key` form for nested keys, bare `section` for unknown
 /// top-level keys. Order follows the document.
 fn find_unknown_keys(value: &toml::Value) -> Vec<String> {
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(cfg.retries.max_phase_attempts, 3);
         assert!(cfg.audit.enabled);
         assert_eq!(cfg.audit.small_fix_line_limit, 30);
-        assert_eq!(cfg.git.branch_prefix, "foreman/run-");
+        assert_eq!(cfg.git.branch_prefix, "pitboss/run-");
         assert!(!cfg.git.create_pr);
         assert!(cfg.tests.command.is_none());
         // Budget enforcement disabled by default; default pricing table covers
@@ -444,7 +444,7 @@ create_pr = true
         // Specified field took effect.
         assert!(cfg.git.create_pr);
         // Untouched field within the same section stays at default.
-        assert_eq!(cfg.git.branch_prefix, "foreman/run-");
+        assert_eq!(cfg.git.branch_prefix, "pitboss/run-");
         // Whole sections missing → defaults.
         assert_eq!(cfg.models, ModelRoles::default());
         assert_eq!(cfg.retries, RetryBudgets::default());
@@ -548,7 +548,7 @@ command = \"cargo test\"
     fn load_reads_file_from_workspace() {
         let dir = tempdir().unwrap();
         std::fs::write(
-            dir.path().join("foreman.toml"),
+            dir.path().join("pitboss.toml"),
             "[git]\nbranch_prefix = \"loaded/\"\n",
         )
         .unwrap();
@@ -559,15 +559,15 @@ command = \"cargo test\"
     #[test]
     fn load_surfaces_parse_errors_with_path_context() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("foreman.toml"), "[broken").unwrap();
+        std::fs::write(dir.path().join("pitboss.toml"), "[broken").unwrap();
         let err = load(dir.path()).unwrap_err();
         let msg = format!("{:#}", err);
-        assert!(msg.contains("foreman.toml"), "msg: {msg}");
+        assert!(msg.contains("pitboss.toml"), "msg: {msg}");
     }
 
     #[test]
     fn init_template_round_trips_through_loader() {
-        // The seed `foreman.toml` written by `foreman init` must parse cleanly
+        // The seed `pitboss.toml` written by `pitboss init` must parse cleanly
         // and produce defaults equivalent to `Config::default()`. If the two
         // ever drift this test catches it.
         let dir = tempdir().unwrap();

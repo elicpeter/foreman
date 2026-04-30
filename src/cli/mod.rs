@@ -16,14 +16,14 @@ pub mod status;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "foreman",
+    name = "pitboss",
     version,
     about = "Orchestrate coding agents through a phased plan"
 )]
 pub struct Cli {
     /// Lower the log level for this invocation. `-v` enables debug output;
-    /// `-vv` enables trace. Equivalent to `FOREMAN_LOG=debug` /
-    /// `FOREMAN_LOG=trace`. The env var still wins when set.
+    /// `-vv` enables trace. Equivalent to `PITBOSS_LOG=debug` /
+    /// `PITBOSS_LOG=trace`. The env var still wins when set.
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
     #[command(subcommand)]
@@ -33,7 +33,7 @@ pub struct Cli {
 impl Cli {
     /// Pick the `tracing-subscriber` filter directive implied by `--verbose`.
     /// Returns `None` when no `-v` was passed (caller falls back to
-    /// `FOREMAN_LOG` / `RUST_LOG` / `info`).
+    /// `PITBOSS_LOG` / `RUST_LOG` / `info`).
     pub fn verbose_filter(&self) -> Option<&'static str> {
         match self.verbose {
             0 => None,
@@ -45,14 +45,14 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Scaffold a new foreman workspace in the current directory.
+    /// Scaffold a new pitboss workspace in the current directory.
     Init,
     /// Generate a `plan.md` for a goal using the planner agent.
     Plan {
         /// Free-form description of what to build.
         goal: String,
         /// Overwrite an existing `plan.md`. Without this flag the command
-        /// refuses to clobber a hand-written or `foreman init` seed file.
+        /// refuses to clobber a hand-written or `pitboss init` seed file.
         #[arg(long)]
         force: bool,
     },
@@ -63,7 +63,7 @@ pub enum Command {
         tui: bool,
         /// After the run finishes successfully, open a pull request via
         /// `gh pr create`. Equivalent to setting `git.create_pr = true` in
-        /// `foreman.toml`; either source enables the post-run PR step.
+        /// `pitboss.toml`; either source enables the post-run PR step.
         #[arg(long)]
         pr: bool,
         /// Swap the configured agent for the deterministic `DryRunAgent`.
@@ -81,15 +81,15 @@ pub enum Command {
         #[arg(long)]
         tui: bool,
         /// After the resumed run finishes successfully, open a pull request
-        /// via `gh pr create`. Mirrors `foreman run --pr`.
+        /// via `gh pr create`. Mirrors `pitboss run --pr`.
         #[arg(long)]
         pr: bool,
         /// Swap the configured agent for the deterministic `DryRunAgent`.
-        /// Mirrors `foreman run --dry-run`.
+        /// Mirrors `pitboss run --dry-run`.
         #[arg(long = "dry-run")]
         dry_run: bool,
     },
-    /// Mark the active run as aborted. `foreman run` and `foreman resume`
+    /// Mark the active run as aborted. `pitboss run` and `pitboss resume`
     /// refuse to operate on an aborted state.
     Abort {
         /// After marking the run aborted, switch HEAD back to the branch that
