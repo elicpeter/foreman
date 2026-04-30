@@ -18,6 +18,9 @@ on:
     # Weekly on Mondays at 14:00 UTC.
     - cron: "0 14 * * 1"
 
+permissions:
+  contents: read
+
 jobs:
   cargo-deny:
     name: check ${{ matrix.checks }}
