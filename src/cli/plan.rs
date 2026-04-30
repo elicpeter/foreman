@@ -34,6 +34,7 @@ use crate::agent::{Agent, AgentEvent, AgentRequest, Role, StopReason};
 use crate::config;
 use crate::plan;
 use crate::prompts;
+use crate::style::{self, col};
 use crate::util::write_atomic;
 
 /// Wall-clock cap for a single planner dispatch. The planner runs once per
@@ -63,8 +64,10 @@ pub struct PlanRunOutcome {
 pub async fn run(workspace: PathBuf, goal: String, force: bool) -> Result<()> {
     let agent = ClaudeCodeAgent::new();
     let outcome = run_with_agent(&workspace, &goal, force, &agent).await?;
+    let c = style::use_color_stdout();
     println!(
-        "wrote {} ({} attempt{})",
+        "{} {} ({} attempt{})",
+        col(c, style::BOLD_GREEN, "wrote"),
         outcome.plan_path.display(),
         outcome.attempts,
         if outcome.attempts == 1 { "" } else { "s" }
@@ -96,6 +99,9 @@ pub async fn run_with_agent<A: Agent>(
     let repo_summary = collect_repo_summary(workspace)?;
     let base_prompt = prompts::planner(goal, &repo_summary);
 
+    let c = style::use_color_stderr();
+    let fm = col(c, style::BOLD_CYAN, "[pitboss]");
+
     let mut last_error: Option<String> = None;
     for attempt in 1..=MAX_PLANNER_ATTEMPTS {
         let user_prompt = match &last_error {
@@ -103,6 +109,17 @@ pub async fn run_with_agent<A: Agent>(
             Some(err) => prepend_retry_context(&base_prompt, err),
         };
         let log_path = planner_log_path(workspace, attempt);
+        eprintln!(
+            "{fm} {} {} (attempt {}/{})",
+            col(c, style::MAGENTA, "dispatching planner"),
+            col(c, style::CYAN, &cfg.models.planner),
+            attempt,
+            MAX_PLANNER_ATTEMPTS
+        );
+        eprintln!(
+            "{fm} {}",
+            col(c, style::DIM, &format!("live log: {}", log_path.display()))
+        );
         let request = AgentRequest {
             role: Role::Planner,
             model: cfg.models.planner.clone(),
@@ -124,6 +141,16 @@ pub async fn run_with_agent<A: Agent>(
                 });
             }
             Err(e) => {
+                let retrying = attempt < MAX_PLANNER_ATTEMPTS;
+                eprintln!(
+                    "{fm} {} {e}{}",
+                    col(c, style::BOLD_YELLOW, "planner output failed to parse:"),
+                    if retrying {
+                        col(c, style::DIM, "; retrying")
+                    } else {
+                        String::new()
+                    }
+                );
                 last_error = Some(format!("{e}"));
             }
         }
@@ -136,31 +163,81 @@ pub async fn run_with_agent<A: Agent>(
     ))
 }
 
+/// Cadence of the "still running…" heartbeat printed to stderr while the
+/// planner agent is in flight. Long enough that a fast dry-run finishes
+/// before the first tick (so unit tests stay quiet), short enough that a
+/// real planner dispatch produces multiple pulses per minute.
+const PLANNER_HEARTBEAT: Duration = Duration::from_secs(15);
+
 /// Run the agent once and return the concatenated stdout body.
 ///
 /// Stdout events are appended verbatim — the planner template instructs the
 /// model to "Output ONLY the file contents", so consecutive text blocks are
-/// pieces of the same plan.md rather than separate messages. Stderr is
-/// dropped; it lives in the per-attempt log file for post-mortem.
+/// pieces of the same plan.md rather than separate messages. Stderr from the
+/// agent process is dropped here; it lives in the per-attempt log file for
+/// post-mortem. `ToolUse` events are surfaced on stderr as they arrive so the
+/// user sees the agent doing real work, and a periodic heartbeat reports
+/// elapsed time so a quiet stretch (model thinking, no tool calls) doesn't
+/// look like the command has hung.
 async fn dispatch_planner<A: Agent>(agent: &A, request: AgentRequest) -> Result<String> {
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
     let cancel = CancellationToken::new();
 
+    // Color is resolved once per dispatch and captured by the spawned tasks.
+    // `move` into each task is fine — `bool` is `Copy`.
+    let c = style::use_color_stderr();
+
     let collector = tokio::spawn(async move {
         let mut buf = String::new();
         while let Some(ev) = rx.recv().await {
-            if let AgentEvent::Stdout(line) = ev {
-                buf.push_str(&line);
+            match ev {
+                AgentEvent::Stdout(line) => buf.push_str(&line),
+                AgentEvent::ToolUse(tool) => {
+                    eprintln!(
+                        "{}",
+                        col(c, style::DARK_GRAY, &format!("[agent:tool] {tool}"))
+                    );
+                }
+                AgentEvent::Stderr(_) | AgentEvent::TokenDelta(_) => {}
             }
         }
         buf
     });
 
-    let outcome = agent
-        .run(request, tx, cancel)
-        .await
-        .with_context(|| format!("plan: agent {:?} dispatch failed", agent.name()))?;
+    let heartbeat_stop = CancellationToken::new();
+    let heartbeat_stop_inner = heartbeat_stop.clone();
+    let heartbeat = tokio::spawn(async move {
+        let fm = col(c, style::BOLD_CYAN, "[pitboss]");
+        let start = std::time::Instant::now();
+        let mut ticker = tokio::time::interval(PLANNER_HEARTBEAT);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Discard the immediate first tick so we don't print "0s elapsed"
+        // before the agent has had a chance to do anything.
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = heartbeat_stop_inner.cancelled() => break,
+                _ = ticker.tick() => {
+                    let elapsed = start.elapsed().as_secs();
+                    eprintln!(
+                        "{fm} {}",
+                        col(
+                            c,
+                            style::DIM,
+                            &format!("planner still running ({elapsed}s elapsed)")
+                        )
+                    );
+                }
+            }
+        }
+    });
+
+    let agent_result = agent.run(request, tx, cancel).await;
+    heartbeat_stop.cancel();
+    let _ = heartbeat.await;
     let body = collector.await.unwrap_or_default();
+    let outcome =
+        agent_result.with_context(|| format!("plan: agent {:?} dispatch failed", agent.name()))?;
 
     match outcome.stop_reason {
         StopReason::Completed => {
