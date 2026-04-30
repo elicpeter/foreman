@@ -219,6 +219,9 @@ pub fn build_agent(cfg: &crate::config::Config) -> Result<Box<dyn Agent + Send +
             if let Some(model) = overrides.model.as_deref() {
                 agent = agent.with_model_override(model);
             }
+            if let Some(mode) = overrides.permission_mode.as_deref() {
+                agent = agent.with_permission_mode(mode);
+            }
             Ok(Box::new(agent))
         }
         backend::BackendKind::Codex => {

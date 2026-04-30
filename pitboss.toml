@@ -3,8 +3,8 @@
 [models]
 planner = "claude-opus-4-7"
 implementer = "claude-opus-4-7"
-auditor = "claude-sonnet-4-6"
-fixer = "claude-sonnet-4-6"
+auditor = "claude-opus-4-7"
+fixer = "claude-opus-4-7"
 
 [retries]
 fixer_max_attempts = 2

@@ -334,6 +334,13 @@ pub struct BackendOverrides {
     /// Model identifier override. When set, this wins over [`ModelRoles`]
     /// for any role dispatched through this backend.
     pub model: Option<String>,
+    /// Pin the permission mode for every dispatch through this backend.
+    /// Only consumed by the Claude Code adapter today (other backends ignore
+    /// it). When `None`, the adapter picks per-model: `auto` for Opus,
+    /// `acceptEdits` for everything else, since Anthropic's Auto Mode is
+    /// Opus-only and Sonnet/Haiku otherwise gate every edit on a prompt
+    /// nobody answers in headless mode.
+    pub permission_mode: Option<String>,
 }
 
 /// Read the workspace's `pitboss.toml`.
@@ -569,6 +576,7 @@ backend = \"codex\"
 binary = \"/opt/anthropic/claude\"
 extra_args = [\"--max-turns\", \"50\"]
 model = \"claude-opus-4-7\"
+permission_mode = \"bypassPermissions\"
 
 [agent.codex]
 binary = \"/usr/local/bin/codex\"
@@ -598,6 +606,10 @@ model = \"gemini-2.5-pro\"
         assert_eq!(
             cfg.agent.claude_code.model.as_deref(),
             Some("claude-opus-4-7")
+        );
+        assert_eq!(
+            cfg.agent.claude_code.permission_mode.as_deref(),
+            Some("bypassPermissions")
         );
         assert_eq!(
             cfg.agent.codex.binary,

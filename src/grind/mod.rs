@@ -8,10 +8,11 @@
 //! grind implementation plan, not a runtime artifact) wires in another piece:
 //! discovery, scheduling, run-dir layout, hooks, parallelism, etc.
 //!
-//! Phase 01 only stands up the data model. The CLI is not yet wired.
+//! Phases 01-02 stand up the data model and discovery. The CLI is not yet wired.
 
 pub mod discovery;
 pub mod prompt;
+pub mod templates;
 
 pub use discovery::{discover_prompts, resolve_home_prompts_dir, DiscoveryOptions, DiscoveryResult};
 pub use prompt::{
