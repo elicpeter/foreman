@@ -36,7 +36,11 @@ pub enum Command {
         force: bool,
     },
     /// Execute the plan, advancing through phases until done or halted.
-    Run,
+    Run {
+        /// Render a live `ratatui` dashboard instead of the plain logger.
+        #[arg(long)]
+        tui: bool,
+    },
     /// Print a summary of the current run.
     Status,
     /// Resume a halted run from where it left off.
@@ -48,7 +52,7 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init => init::run(std::env::current_dir()?),
         Command::Plan { goal, force } => plan::run(std::env::current_dir()?, goal, force).await,
-        Command::Run => run::run(std::env::current_dir()?).await,
+        Command::Run { tui } => run::run(std::env::current_dir()?, tui).await,
         Command::Status => unimplemented!("`foreman status` lands in phase 17"),
         Command::Resume => unimplemented!("`foreman resume` lands in phase 17"),
     }

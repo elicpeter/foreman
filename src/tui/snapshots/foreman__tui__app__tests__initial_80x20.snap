@@ -1,0 +1,25 @@
+---
+source: src/tui/app.rs
+assertion_line: 570
+expression: snap
+---
+foreman  run 20260430T120000Z  branch foreman/run-20260430T120000Z              
+phase 01 — Project foundation   [idle]                                          
+────────────────────────────────────────────────────────────────────────────────
+┌ phases (0/3) ────────────────┐┌ agent output ────────────────────────────────┐
+│· 01 Project foundation       ││                                              │
+│· 02 Domain types             ││                                              │
+│· 03 Plan parser              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+│                              ││                                              │
+└──────────────────────────────┘└──────────────────────────────────────────────┘
+q quit   p pause   a abort

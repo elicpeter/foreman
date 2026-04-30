@@ -25,9 +25,13 @@ use crate::git::{Git, ShellGit};
 use crate::plan::{self, Plan};
 use crate::runner::{self, RunSummary, Runner};
 use crate::state::{self, RunState};
+use crate::tui;
 
 /// Top-level entry point for the `run` subcommand.
-pub async fn run(workspace: PathBuf) -> Result<()> {
+///
+/// `tui` toggles between the plain stderr logger (default) and the
+/// `ratatui` dashboard.
+pub async fn run(workspace: PathBuf, tui: bool) -> Result<()> {
     let config = config::load(&workspace)
         .with_context(|| format!("run: loading config in {:?}", workspace))?;
     let plan = load_plan(&workspace)?;
@@ -59,15 +63,19 @@ pub async fn run(workspace: PathBuf) -> Result<()> {
     let agent = ClaudeCodeAgent::new();
     let mut runner = Runner::new(workspace, config, plan, deferred, state, agent, git);
 
-    let logger = spawn_logger(&runner);
-    let summary = runner.run().await;
+    let summary = if tui {
+        tui::run(&mut runner).await?
+    } else {
+        let logger = spawn_logger(&runner);
+        let result = runner.run().await;
+        let _ = logger.await;
+        Some(result?)
+    };
 
-    drop(runner);
-    let _ = logger.await;
-
-    match summary? {
-        RunSummary::Finished => Ok(()),
-        RunSummary::Halted { phase_id, reason } => {
+    match summary {
+        None => Ok(()),
+        Some(RunSummary::Finished) => Ok(()),
+        Some(RunSummary::Halted { phase_id, reason }) => {
             Err(anyhow!("run halted at phase {phase_id}: {reason}"))
         }
     }
