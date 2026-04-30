@@ -21,6 +21,7 @@
 
 pub mod backend;
 pub mod claude_code;
+pub mod codex;
 pub mod dry_run;
 pub mod subprocess;
 
@@ -35,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::state::TokenUsage;
 
-pub use subprocess::{run_logged, SubprocessOutcome};
+pub use subprocess::{run_logged, run_logged_with_stdin, SubprocessOutcome};
 
 /// Which agent role is being dispatched.
 ///
@@ -204,9 +205,20 @@ pub fn build_agent(cfg: &crate::config::Config) -> Result<Box<dyn Agent + Send +
     };
     match kind {
         backend::BackendKind::ClaudeCode => Ok(Box::new(claude_code::ClaudeCodeAgent::new())),
-        backend::BackendKind::Codex => Err(anyhow::anyhow!(
-            "backend 'codex' is not yet implemented"
-        )),
+        backend::BackendKind::Codex => {
+            let overrides = &cfg.agent.codex;
+            let mut agent = match overrides.binary.as_ref() {
+                Some(path) => codex::CodexAgent::with_binary(path),
+                None => codex::CodexAgent::new(),
+            };
+            if !overrides.extra_args.is_empty() {
+                agent = agent.with_extra_args(overrides.extra_args.clone());
+            }
+            if let Some(model) = overrides.model.as_deref() {
+                agent = agent.with_model_override(model);
+            }
+            Ok(Box::new(agent))
+        }
         backend::BackendKind::Aider => Err(anyhow::anyhow!(
             "backend 'aider' is not yet implemented"
         )),
@@ -265,12 +277,13 @@ mod tests {
 
     #[test]
     fn build_agent_returns_not_implemented_for_pending_backends() {
-        // The dispatch arms exist for codex/aider/gemini today but no adapter
-        // is wired yet — they must surface a clear error rather than silently
-        // falling back to the default backend. `Box<dyn Agent>` doesn't impl
-        // Debug, so we can't use `unwrap_err` and instead match the Result
-        // explicitly.
-        for name in ["codex", "aider", "gemini"] {
+        // Adapters that haven't shipped yet must surface a clear error rather
+        // than silently falling back to the default backend. `Box<dyn Agent>`
+        // doesn't impl Debug, so we can't use `unwrap_err` and instead match
+        // the Result explicitly. As each adapter lands its name moves out of
+        // this list (codex shipped in phase 02 — see
+        // `build_agent_dispatches_explicit_codex` below).
+        for name in ["aider", "gemini"] {
             let mut cfg = crate::config::Config::default();
             cfg.agent.backend = Some(name.to_string());
             match build_agent(&cfg) {
@@ -283,6 +296,37 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn build_agent_dispatches_explicit_codex() {
+        // Phase 02 acceptance: setting `[agent] backend = "codex"` must build
+        // the CodexAgent adapter rather than the default Claude Code one.
+        // `Box<dyn Agent>` hides the concrete type, so we verify via
+        // `Agent::name`, which is the same surface the runner logs use.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("codex".to_string());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "codex"),
+            Err(e) => panic!("explicit codex must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_codex_honors_binary_override() {
+        // The `[agent.codex] binary = "..."` override must reach the
+        // constructed agent so tests (and real installs in non-standard
+        // locations) can point at a stub script. The dispatch path doesn't
+        // spawn the binary, so an obviously-fake path is fine here.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("codex".to_string());
+        cfg.agent.codex.binary = Some(std::path::PathBuf::from("/tmp/fake-codex"));
+        cfg.agent.codex.extra_args = vec!["--quiet".into()];
+        cfg.agent.codex.model = Some("gpt-5-codex".into());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "codex"),
+            Err(e) => panic!("codex with overrides must build: {e:#}"),
         }
     }
 
