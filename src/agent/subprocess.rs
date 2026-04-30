@@ -370,32 +370,36 @@ mod tests {
         let log = dir.path().join("run.log");
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg("cat");
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, mut rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
-        let payload: Vec<u8> = (0..4096)
+        let expected_lines = 16_384usize;
+        let payload: Vec<u8> = (0..expected_lines)
             .flat_map(|i| format!("line {i}\n").into_bytes())
             .collect();
-        let expected_lines = 4096;
+        // Drain events concurrently so the bounded channel doesn't itself
+        // become a back-pressure source that masks what the test is checking.
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(e) = rx.recv().await {
+                if let AgentEvent::Stdout(s) = e {
+                    out.push(s);
+                }
+            }
+            out
+        });
         let outcome = run_logged_with_stdin(
             cmd,
             &log,
             tx,
             cancel,
-            Duration::from_secs(10),
+            Duration::from_secs(20),
             Some(payload),
         )
         .await
         .unwrap();
         assert_eq!(outcome.stop_reason, StopReason::Completed);
         assert_eq!(outcome.exit_code, 0);
-        let stdout: Vec<_> = drain(rx)
-            .await
-            .into_iter()
-            .filter_map(|e| match e {
-                AgentEvent::Stdout(s) => Some(s),
-                _ => None,
-            })
-            .collect();
+        let stdout = collector.await.unwrap();
         assert_eq!(stdout.len(), expected_lines);
         assert_eq!(stdout[0], "line 0");
         assert_eq!(
