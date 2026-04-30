@@ -244,6 +244,28 @@ pub fn parse_plan_str(raw: &str, name: String, display: &str) -> Result<GrindPla
                 name: entry.name.clone(),
             });
         }
+        // Mirror `PromptMeta::validate`: zero is invalid for both fields.
+        // Without this, `every_override = 0` makes the scheduler's modulus
+        // skip the prompt forever, and `weight_override = 0` produces a
+        // score-0 candidate that can still win alphabetical tiebreaks.
+        if entry.weight_override == Some(0) {
+            return Err(PlanLoadError::Invalid {
+                path: display.to_string(),
+                message: format!(
+                    "prompts[{:?}].weight_override must be >= 1",
+                    entry.name
+                ),
+            });
+        }
+        if entry.every_override == Some(0) {
+            return Err(PlanLoadError::Invalid {
+                path: display.to_string(),
+                message: format!(
+                    "prompts[{:?}].every_override must be >= 1",
+                    entry.name
+                ),
+            });
+        }
     }
 
     Ok(plan)
@@ -420,6 +442,44 @@ name = "fp-hunter"
         let raw = "[[prompts\nname = 'broken'\n";
         let err = parse(raw, "p").unwrap_err();
         assert!(matches!(err, PlanLoadError::Malformed { .. }));
+    }
+
+    #[test]
+    fn weight_override_zero_is_rejected() {
+        let raw = r#"
+[[prompts]]
+name = "fp-hunter"
+weight_override = 0
+"#;
+        let err = parse(raw, "p").unwrap_err();
+        match err {
+            PlanLoadError::Invalid { message, .. } => {
+                assert!(
+                    message.contains("weight_override"),
+                    "msg: {message}"
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_override_zero_is_rejected() {
+        let raw = r#"
+[[prompts]]
+name = "fp-hunter"
+every_override = 0
+"#;
+        let err = parse(raw, "p").unwrap_err();
+        match err {
+            PlanLoadError::Invalid { message, .. } => {
+                assert!(
+                    message.contains("every_override"),
+                    "msg: {message}"
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 
     #[test]

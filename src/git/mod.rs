@@ -23,6 +23,7 @@ use std::path::Path;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::plan::PhaseId;
@@ -32,7 +33,8 @@ pub use pr::{pr_body, pr_title, PrSummary};
 pub use shell::ShellGit;
 
 /// A git commit hash (full SHA-1 hex from `git rev-parse HEAD`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct CommitId(String);
 
 impl CommitId {
