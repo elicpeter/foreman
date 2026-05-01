@@ -29,6 +29,7 @@ Pitboss is a Rust CLI that drives a coding agent through a multi-phase implement
 - [Quickstart](#quickstart)
 - [Generating a plan](#generating-a-plan)
 - [The run loop](#the-run-loop)
+- [Grind: rotating prompt runner](#grind-rotating-prompt-runner)
 - [Configuration](#configuration)
 - [Agent backends](#agent-backends)
 - [Test runner detection](#test-runner-detection)
@@ -184,6 +185,35 @@ Every retry is bounded. When a budget is exhausted the runner halts with a clear
 <div align="center">
   <sub align="center"><i>USD budget tripped mid-phase. Pitboss halts, no commit lands, `pitboss rebuy` picks up from phase 02.</i></sub>
 </div>
+
+## Grind: rotating prompt runner
+
+`pitboss grind` is the second execution mode. Where `play` walks one phased plan and stops, `grind` rotates through a set of user-authored markdown prompts and keeps going until a budget trips or you Ctrl-C it. No auditor, no fixer cycle, no `plan.md`. One session at a time by default; prompts marked `parallel_safe` can fan out into worktrees.
+
+Reach for it when the work is naturally a queue rather than a sequence: recurring lint sweeps, doc passes, snapshot refreshes, dependency bumps across a monorepo, anything you'd otherwise run by hand on a loop.
+
+```sh
+pitboss prompts new fix-lints     # scaffold a prompt under .pitboss/grind/prompts/
+$EDITOR .pitboss/grind/prompts/fix-lints.md
+pitboss grind --tui               # rotate through every discovered prompt
+```
+
+<div align="center">
+  <img src="assets/pitboss-grind.png" alt="pitboss grind --tui dashboard" width="900"/>
+</div>
+<div align="center">
+  <sub align="center"><i>`pitboss grind --tui`. Sessions on the left with status glyphs (`+` ok, `~` dirty, `x` error, `>` in flight), live agent output on the right, run-level budgets and the next scheduler pick along the bottom.</i></sub>
+</div>
+
+A few flags worth knowing:
+
+- `--rotation <name>` loads a specific rotation file from `.pitboss/grind/rotations/<name>.toml`. Without it, grind builds a default rotation over every discovered prompt.
+- `--max-iterations N`, `--until <RFC3339>`, `--max-cost <USD>`, `--max-tokens N` cap the run. The first one to trip halts the loop with exit code 3.
+- `--resume [<run-id>]` picks up a halted run on the same branch. With no argument, grind picks the most recent active or aborted run.
+- `--pr` opens a pull request when the run finishes cleanly; `--require-pr` upgrades a failed `gh pr create` to a non-zero exit.
+- `--dry-run` resolves the rotation, prints the discovered prompts, the budget plan, and the first few scheduler picks, then exits without dispatching anything.
+
+Each grind run gets its own branch (`pitboss/grind/<run-id>`) and a per-run directory under `.pitboss/grind/runs/<run-id>/` containing `state.json`, the source-of-truth `sessions.jsonl` log, a rendered `sessions.md`, per-session transcripts, and (for parallel sessions) a `worktrees/` subtree.
 
 ## Configuration
 

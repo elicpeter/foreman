@@ -53,6 +53,24 @@ impl Cli {
             _ => Some("trace"),
         }
     }
+
+    /// `true` when the parsed subcommand will take over the terminal with the
+    /// `ratatui` dashboard. The tracing `fmt` layer must be suppressed in that
+    /// mode: any `info!` / `warn!` write into the alternate screen corrupts
+    /// ratatui's diff buffer (cells it thinks are unchanged stop getting
+    /// repainted), so stale log chars survive across redraws and bleed
+    /// through the dashboard. Drop `--tui` for log-based debugging.
+    pub fn is_tui_mode(&self) -> bool {
+        match &self.command {
+            Command::Play { tui, .. } | Command::Rebuy { tui, .. } => *tui,
+            Command::Grind(args) => args.tui,
+            Command::Init
+            | Command::Plan { .. }
+            | Command::Status
+            | Command::Fold { .. }
+            | Command::Prompts(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

@@ -81,6 +81,12 @@ pub const GRIND_OUTPUT_BUFFER_LINES: usize = 1000;
 /// entries and drop the rest.
 pub const GRIND_SESSION_LOG_LINES: usize = 200;
 
+/// Height of the session-stats panel rendered under the sessions list. Sized
+/// for 6 content lines (elapsed / cost / tokens / in-out / sessions / until)
+/// inside its border. Mirrors the play dashboard's panel so the two views
+/// surface comparable run-level information at the same screen real estate.
+const STATS_HEIGHT: u16 = 8;
+
 /// Drive a [`GrindRunner`] with the grind dashboard attached.
 ///
 /// Subscribes to the runner's [`GrindEvent`] stream, sets up the terminal in
@@ -537,7 +543,7 @@ impl GrindApp {
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(0),
-                Constraint::Length(2),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -598,8 +604,119 @@ impl GrindApp {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
-        self.render_sessions(frame, cols[0]);
+        // Drop the stats panel on terminals too short to fit it without
+        // squeezing the sessions list to nothing: the panel needs
+        // `STATS_HEIGHT` rows plus a few for the list to remain useful. Same
+        // shape as `App::render_body` in the play view.
+        if cols[0].height >= STATS_HEIGHT + 4 {
+            let left = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(STATS_HEIGHT)])
+                .split(cols[0]);
+            self.render_sessions(frame, left[0]);
+            self.render_stats(frame, left[1]);
+        } else {
+            self.render_sessions(frame, cols[0]);
+        }
         self.render_output(frame, cols[1]);
+    }
+
+    fn render_stats(&self, frame: &mut Frame, area: Rect) {
+        let label = Style::default().fg(Color::Gray);
+        let value = Style::default().fg(Color::White);
+        let dim = Style::default().fg(Color::DarkGray);
+
+        let elapsed = format_elapsed(self.now() - self.started_at);
+        let tokens_total = self.tokens_input.saturating_add(self.tokens_output);
+
+        let cost_text = match self.budgets.max_cost_usd {
+            Some(cap) => format!("{} / {}", format_usd(self.cost_usd), format_usd(cap)),
+            None => format_usd(self.cost_usd),
+        };
+        let cost_style = warning_style_if(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            self.warnings
+                .iter()
+                .any(|w| matches!(w, BudgetWarningKind::Cost { .. })),
+        );
+
+        let tokens_text = match self.budgets.max_tokens {
+            Some(cap) => format!("{} / {}", format_tokens(tokens_total), format_tokens(cap)),
+            None => format_tokens(tokens_total),
+        };
+        let tokens_style = warning_style_if(
+            value,
+            self.warnings
+                .iter()
+                .any(|w| matches!(w, BudgetWarningKind::Tokens { .. })),
+        );
+
+        let sessions_text = match self.budgets.max_iterations {
+            Some(cap) => format!("{} / {}", self.iterations, cap),
+            None => self.iterations.to_string(),
+        };
+        let sessions_style = warning_style_if(
+            value,
+            self.warnings
+                .iter()
+                .any(|w| matches!(w, BudgetWarningKind::Iterations { .. })),
+        );
+
+        let until_text = match self.budgets.until {
+            Some(until) => {
+                let remaining = until - self.now();
+                if remaining.num_seconds() <= 0 {
+                    "0s".to_string()
+                } else {
+                    format_elapsed(remaining)
+                }
+            }
+            None => "—".to_string(),
+        };
+        let until_style = warning_style_if(
+            value,
+            self.warnings
+                .iter()
+                .any(|w| matches!(w, BudgetWarningKind::Until { .. })),
+        );
+
+        let lines: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled(" elapsed   ", label),
+                Span::styled(elapsed, Style::default().fg(Color::Cyan)),
+            ]),
+            Line::from(vec![
+                Span::styled(" cost      ", label),
+                Span::styled(cost_text, cost_style),
+            ]),
+            Line::from(vec![
+                Span::styled(" tokens    ", label),
+                Span::styled(tokens_text, tokens_style),
+            ]),
+            Line::from(vec![
+                Span::styled(" in / out  ", label),
+                Span::styled(format_tokens(self.tokens_input), value),
+                Span::styled(" / ", dim),
+                Span::styled(format_tokens(self.tokens_output), value),
+            ]),
+            Line::from(vec![
+                Span::styled(" sessions  ", label),
+                Span::styled(sessions_text, sessions_style),
+            ]),
+            Line::from(vec![
+                Span::styled(" until     ", label),
+                Span::styled(until_text, until_style),
+            ]),
+        ];
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(" session ", label));
+        let para = Paragraph::new(lines).block(block);
+        frame.render_widget(para, area);
     }
 
     fn render_sessions(&self, frame: &mut Frame, area: Rect) {
@@ -676,88 +793,18 @@ impl GrindApp {
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let label = Style::default().fg(Color::Gray);
-        let value = Style::default().fg(Color::White);
 
-        // Sessions cell.
-        let sessions_text = match self.budgets.max_iterations {
-            Some(cap) => format!("{}/{}", self.iterations, cap),
-            None => format!("{}", self.iterations),
-        };
-        let sessions_style = warning_style_if(
-            value,
-            self.warnings
-                .iter()
-                .any(|w| matches!(w, BudgetWarningKind::Iterations { .. })),
-        );
-
-        // Tokens cell.
-        let tokens_total = self.tokens_input.saturating_add(self.tokens_output);
-        let tokens_text = match self.budgets.max_tokens {
-            Some(cap) => format!("{}/{}", format_tokens(tokens_total), format_tokens(cap)),
-            None => format_tokens(tokens_total),
-        };
-        let tokens_style = warning_style_if(
-            value,
-            self.warnings
-                .iter()
-                .any(|w| matches!(w, BudgetWarningKind::Tokens { .. })),
-        );
-
-        // Cost cell.
-        let cost_text = match self.budgets.max_cost_usd {
-            Some(cap) => format!("{}/{}", format_usd(self.cost_usd), format_usd(cap)),
-            None => format_usd(self.cost_usd),
-        };
-        let cost_style = warning_style_if(
-            Style::default().fg(Color::Green),
-            self.warnings
-                .iter()
-                .any(|w| matches!(w, BudgetWarningKind::Cost { .. })),
-        );
-
-        // Until cell.
-        let until_text = match self.budgets.until {
-            Some(until) => {
-                let remaining = until - self.now();
-                if remaining.num_seconds() <= 0 {
-                    "0s".to_string()
-                } else {
-                    format_elapsed(remaining)
-                }
+        let line = match &self.stop_reason {
+            None => {
+                let next_text = self
+                    .next_pick
+                    .clone()
+                    .unwrap_or_else(|| "(none)".to_string());
+                Line::from(vec![
+                    Span::styled("next ", label),
+                    Span::styled(next_text, Style::default().fg(Color::Cyan)),
+                ])
             }
-            None => "—".to_string(),
-        };
-        let until_style = warning_style_if(
-            value,
-            self.warnings
-                .iter()
-                .any(|w| matches!(w, BudgetWarningKind::Until { .. })),
-        );
-
-        let next_text = self
-            .next_pick
-            .clone()
-            .unwrap_or_else(|| "(none)".to_string());
-
-        let line1 = Line::from(vec![
-            Span::styled("sessions ", label),
-            Span::styled(sessions_text, sessions_style),
-            Span::raw("   "),
-            Span::styled("tokens ", label),
-            Span::styled(tokens_text, tokens_style),
-            Span::raw("   "),
-            Span::styled("cost ", label),
-            Span::styled(cost_text, cost_style),
-            Span::raw("   "),
-            Span::styled("until ", label),
-            Span::styled(until_text, until_style),
-        ]);
-
-        let line2 = match &self.stop_reason {
-            None => Line::from(vec![
-                Span::styled("next ", label),
-                Span::styled(next_text, Style::default().fg(Color::Cyan)),
-            ]),
             Some(reason) => {
                 let (text, color) = stop_reason_display(reason);
                 Line::from(vec![
@@ -770,7 +817,7 @@ impl GrindApp {
             }
         };
 
-        let para = Paragraph::new(vec![line1, line2]);
+        let para = Paragraph::new(line);
         frame.render_widget(para, area);
     }
 
@@ -1370,6 +1417,77 @@ mod tests {
             stop_reason: GrindStopReason::Completed,
         });
         events
+    }
+
+    #[test]
+    fn render_includes_session_stats_panel() {
+        // The stats panel mirrors the play dashboard's: it must surface
+        // elapsed / cost / tokens / sessions / until on the left column so
+        // users running `pitboss grind --tui` see the same run-level info as
+        // `pitboss play --tui`. Regression guard for the prior layout that
+        // shipped only a tokens/cost footer with no per-row breakdown.
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = fixture_app();
+        app.set_now(fixture_started_at() + chrono::Duration::seconds(134));
+        app.handle_event(GrindEvent::SessionStarted {
+            seq: 1,
+            prompt: "bughunt".into(),
+            parallel_safe: false,
+        });
+        app.handle_event(GrindEvent::SessionFinished {
+            record: fixture_record(1, SessionStatus::Ok),
+        });
+        app.handle_event(GrindEvent::SchedulerPicked {
+            rotation: 2,
+            pick: Some("triage".into()),
+        });
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut rendered = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        assert!(
+            rendered.contains("session"),
+            "stats panel title missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("elapsed"),
+            "stats panel elapsed row missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("cost"),
+            "stats panel cost row missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("tokens"),
+            "stats panel tokens row missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("in / out"),
+            "stats panel in/out row missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("sessions  1 / 10"),
+            "stats panel sessions row missing or wrong cap:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("2m 14s"),
+            "elapsed value missing:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("next "),
+            "footer next hint missing:\n{rendered}"
+        );
     }
 
     #[test]

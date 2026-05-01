@@ -32,8 +32,16 @@ fn init_tracing(cli: &Cli) {
         .or_else(|_| EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| EnvFilter::new(cli.verbose_filter().unwrap_or("info")));
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_target(false))
-        .init();
+    let registry = tracing_subscriber::registry().with(filter);
+    if cli.is_tui_mode() {
+        // Skip the fmt layer entirely. The TUI owns the alternate screen and
+        // any concurrent stdout/stderr writes corrupt ratatui's cell-diff
+        // (cells it thinks are unchanged stop getting repainted), leaving
+        // stale log fragments stuck on the dashboard. The runner publishes
+        // its progress on a broadcast channel that the TUI subscribes to, so
+        // nothing is lost; drop `--tui` if you need the log stream.
+        registry.init();
+    } else {
+        registry.with(fmt::layer().with_target(false)).init();
+    }
 }

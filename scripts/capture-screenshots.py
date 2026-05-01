@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture the README screenshots: TUI dashboard, `pitboss status`, halted run.
+"""Capture the README screenshots: TUI dashboard, `pitboss status`, halted run, grind dashboard.
 
 Each scene is captured with `vhs` (charm.sh), then framed with a cyan
 gradient that anchors on the wordmark color (#06b6d4 cyan-500). Output
@@ -7,9 +7,9 @@ PNGs land in `assets/`.
 
 Pipeline per scene:
   1. set up whatever the scene needs
-     - tui / halt: a temp Rust crate that depends on `pitboss` via path
-       and renders a single ratatui frame from a deterministic App state,
-       then sleeps long enough for vhs to screenshot it
+     - tui / halt / grind: a temp Rust crate that depends on `pitboss`
+       via path and renders a single ratatui frame from a deterministic
+       App state, then sleeps long enough for vhs to screenshot it
      - status: a temp pitboss workspace (real `git init`, plan.md,
        deferred.md, pitboss.toml, .pitboss/state.json, one phase 01
        commit) so `pitboss status` produces realistic output
@@ -135,6 +135,7 @@ publish = false
 pitboss = {{ path = "{ROOT}" }}
 ratatui = "0.30"
 crossterm = "0.29"
+chrono = "0.4"
 """
 
 DEMO_MAIN_RS = r"""
@@ -151,12 +152,17 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+use chrono::{Duration as ChronoDuration, Utc};
 
 use pitboss::config::ModelPricing;
 use pitboss::git::CommitId;
+use pitboss::grind::{GrindEvent, PlanBudgets, SessionRecord, SessionStatus};
 use pitboss::plan::{Phase, PhaseId, Plan};
 use pitboss::runner::{Event, HaltReason};
-use pitboss::state::RunState;
+use pitboss::state::{RunState, TokenUsage};
+use pitboss::tui::grind::GrindApp;
 use pitboss::tui::{AgentDisplay, App, UsageView};
 
 fn pid(s: &str) -> PhaseId {
@@ -280,11 +286,136 @@ fn build_halt() -> App {
     app
 }
 
+fn build_grind() -> GrindApp {
+    // Anchor started_at near wall-clock now so the header's "elapsed" cell
+    // reads as a few minutes, not as days against a hard-coded date. The
+    // per-session offsets below stay relative to this anchor so the
+    // SessionFinished records sit just in the past.
+    let run_started = Utc::now() - ChronoDuration::seconds(285);
+    let budgets = PlanBudgets {
+        max_iterations: Some(50),
+        until: None,
+        max_cost_usd: Some(5.00),
+        max_tokens: Some(1_000_000),
+    };
+    let mut app = GrindApp::new(
+        "20260430T143022Z".into(),
+        "pitboss/grind/20260430T143022Z".into(),
+        "code-quality".into(),
+        "claude-code".into(),
+        run_started,
+        budgets,
+    );
+
+    let session = |seq: u32,
+                   prompt: &str,
+                   status: SessionStatus,
+                   start_offset_secs: i64,
+                   duration_secs: i64,
+                   input: u64,
+                   output: u64,
+                   cost: f64,
+                   commit: Option<&str>|
+     -> SessionRecord {
+        let started = run_started + ChronoDuration::seconds(start_offset_secs);
+        let ended = started + ChronoDuration::seconds(duration_secs);
+        SessionRecord {
+            seq,
+            run_id: "20260430T143022Z".into(),
+            prompt: prompt.into(),
+            started_at: started,
+            ended_at: ended,
+            status,
+            summary: Some(format!("ran {prompt}")),
+            commit: commit.map(CommitId::new),
+            tokens: TokenUsage {
+                input,
+                output,
+                by_role: HashMap::new(),
+            },
+            cost_usd: cost,
+            transcript_path: PathBuf::from(format!("transcripts/session-{seq:04}.log")),
+        }
+    };
+
+    let finished = [
+        session(1, "fix-lints",         SessionStatus::Ok,    0,   28, 4_120, 1_310, 0.038, Some("a1b2c3d")),
+        session(2, "tighten-tests",     SessionStatus::Ok,    30,  41, 5_870, 1_980, 0.063, Some("b2c3d4e")),
+        session(3, "doc-pass",          SessionStatus::Dirty, 75,  19, 2_410,   720, 0.018, None),
+        session(4, "fix-lints",         SessionStatus::Ok,    98,  35, 4_960, 1_540, 0.052, Some("c3d4e5f")),
+        session(5, "tighten-tests",     SessionStatus::Error, 138, 22, 3_120, 1_010, 0.029, None),
+        session(6, "refresh-snapshots", SessionStatus::Ok,    164, 48, 7_240, 2_320, 0.084, Some("d4e5f6a")),
+        session(7, "fix-lints",         SessionStatus::Ok,    218, 31, 4_540, 1_410, 0.046, Some("e5f6a7b")),
+    ];
+
+    // Skip SessionStarted for finished rows so the dashboard uses each
+    // record's started_at/ended_at directly (the SessionStarted handler
+    // would otherwise rebase started_at to wall-clock now and the duration
+    // cell would render as 0s against the past-dated ended_at).
+    for record in &finished {
+        app.handle_event(GrindEvent::SessionFinished {
+            record: record.clone(),
+        });
+    }
+
+    // Active session: started but not finished, with output lines so the
+    // right pane is populated and the left pane shows a `>` glyph.
+    app.handle_event(GrindEvent::SessionStarted {
+        seq: 8,
+        prompt: "doc-pass".into(),
+        parallel_safe: false,
+    });
+    let active_lines = [
+        "Reading scratchpad.md for accumulated notes",
+        "Skimming src/grind/run.rs for stale doc comments",
+        "tool: Edit",
+        "Trimming stale \"Phase 07 shipped...\" line; drift since merge",
+        "tool: Edit",
+        "Rewording rustdoc on GrindRunner::resume",
+        "Writing summary to $PITBOSS_SUMMARY_FILE",
+    ];
+    for line in active_lines {
+        if let Some(name) = line.strip_prefix("tool: ") {
+            app.handle_event(GrindEvent::AgentToolUse {
+                seq: 8,
+                name: name.into(),
+            });
+        } else {
+            app.handle_event(GrindEvent::AgentStdout {
+                seq: 8,
+                line: line.into(),
+            });
+        }
+    }
+
+    app.handle_event(GrindEvent::SchedulerPicked {
+        rotation: 8,
+        pick: Some("refresh-snapshots".into()),
+    });
+
+    app
+}
+
+enum DemoApp {
+    Play(App),
+    Grind(GrindApp),
+}
+
+impl DemoApp {
+    fn render(&self, frame: &mut ratatui::Frame) {
+        match self {
+            DemoApp::Play(a) => a.render(frame),
+            DemoApp::Grind(a) => a.render(frame),
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scene = env::args().nth(1).unwrap_or_else(|| "tui".to_string());
     let app = match scene.as_str() {
-        "tui" => build_tui(),
-        "halt" => build_halt(),
+        "tui" => DemoApp::Play(build_tui()),
+        "halt" => DemoApp::Play(build_halt()),
+        "grind" => DemoApp::Grind(build_grind()),
         other => return Err(format!("unknown scene: {other}").into()),
     };
 
@@ -295,8 +426,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let result: Result<(), Box<dyn std::error::Error>> = (|| {
+        // Initial draw renders the layout; the second draw (after a short
+        // pause) lets time-sensitive cells like the header's "elapsed"
+        // counter and the in-flight session's duration tick forward before
+        // vhs takes its screenshot.
         terminal.draw(|f| app.render(f))?;
-        sleep(Duration::from_secs(6));
+        sleep(Duration::from_millis(2500));
+        terminal.draw(|f| app.render(f))?;
+        sleep(Duration::from_millis(3500));
         Ok(())
     })();
 
@@ -368,9 +505,11 @@ def setup_status_workspace(workdir: Path) -> None:
     one completed phase committed on the run branch, deferred items, real
     token usage so the budget block has numbers in it."""
     workdir.mkdir(parents=True, exist_ok=True)
-    (workdir / "plan.md").write_text(STATUS_PLAN_MD)
-    (workdir / "deferred.md").write_text(STATUS_DEFERRED_MD)
-    (workdir / "pitboss.toml").write_text(STATUS_PITBOSS_TOML)
+    play_dir = workdir / ".pitboss" / "play"
+    play_dir.mkdir(parents=True, exist_ok=True)
+    (play_dir / "plan.md").write_text(STATUS_PLAN_MD)
+    (play_dir / "deferred.md").write_text(STATUS_DEFERRED_MD)
+    (workdir / ".pitboss" / "config.toml").write_text(STATUS_PITBOSS_TOML)
 
     # Real git history so `last commit:` resolves to a sensible value.
     env = {
@@ -391,8 +530,7 @@ def setup_status_workspace(workdir: Path) -> None:
         env=env,
     )
 
-    state_dir = workdir / ".pitboss"
-    state_dir.mkdir()
+    state_dir = play_dir
     state = {
         "run_id": "20260429T143022Z",
         "branch": "pitboss/run-20260429T143022Z",
@@ -602,6 +740,7 @@ def capture_all() -> None:
             # name           command                w     h
             ("pitboss-tui",    f"{demo_bin} tui",   1500, 480),
             ("pitboss-halt",   f"{demo_bin} halt",  1500, 460),
+            ("pitboss-grind",  f"{demo_bin} grind", 1500, 520),
             ("pitboss-status", "pitboss status",     880, 360),
         ]
 
