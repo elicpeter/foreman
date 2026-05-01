@@ -58,5 +58,5 @@ pub use state::{
 };
 pub use worktree::{
     merge_scratchpad_into_run, parallel_safe_violation_summary, session_branch_name,
-    sweep_stale_session_worktrees, SessionWorktree,
+    sweep_stale_session_worktrees, MergeOutcome, ParallelSafeViolationSite, SessionWorktree,
 };

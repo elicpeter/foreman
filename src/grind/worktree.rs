@@ -22,11 +22,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use tracing::warn;
+use tokio::sync::Mutex as TokioMutex;
+use tracing::{debug, warn};
 
-use crate::git::{Git, ShellGit};
+use crate::git::{CommitId, Git, ShellGit};
 
-use super::run_dir::RunPaths;
+use super::prompt::PromptDoc;
+use super::run_dir::{RunPaths, SessionStatus};
 
 /// Filename used for the per-session scratchpad copy inside each worktree.
 const PER_SESSION_SCRATCHPAD: &str = "scratchpad.md";
@@ -200,6 +202,227 @@ impl SessionWorktree {
             .with_context(|| format!("worktree: deleting branch {:?}", self.branch))?;
         Ok(dest)
     }
+
+    /// Run the parallel-session merge dance: sync the worktree to the
+    /// run-branch tip, commit the agent's changes, fast-forward the run
+    /// branch, then stash any leftover edits.
+    ///
+    /// Held under `run_branch_lock` for the entire dance so a sibling parallel
+    /// session cannot interleave between sync and ff-merge. Returns a
+    /// [`MergeOutcome`] the caller folds into the session record. The starting
+    /// `status`/`summary` are passed in so a non-`Ok`/`Error` agent outcome
+    /// (e.g., `Aborted` from a Ctrl-C, `Timeout` from a per-prompt cap) can
+    /// short-circuit straight to teardown without touching git state.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn merge_into<G: Git + ?Sized>(
+        &self,
+        repo_git: &G,
+        run_branch: &str,
+        run_branch_lock: &TokioMutex<()>,
+        prompt: &PromptDoc,
+        run_id: &str,
+        starting_status: SessionStatus,
+        starting_summary: String,
+    ) -> Result<MergeOutcome> {
+        let g = self.worktree_git();
+        let _guard = run_branch_lock.lock().await;
+
+        let mut status = starting_status;
+        let mut summary = starting_summary;
+        let mut commit: Option<CommitId> = None;
+        let mut sync_ok = true;
+
+        // Step 1 — sync the worktree's session branch to the current
+        // run-branch tip. When the session was created run_branch was at
+        // commit A; another parallel session may have advanced it to A'
+        // since. Replaying that fast-forward inside the worktree is what
+        // makes the eventual run-branch ff-merge possible. If the FF
+        // refuses (because the agent's uncommitted edits would be
+        // overwritten by the incoming run-branch tip), the prompt
+        // violated its `parallel_safe: true` claim — we mark the session
+        // Error and skip the commit / merge entirely.
+        if status == SessionStatus::Ok || status == SessionStatus::Error {
+            if let Err(e) = g.merge_ff_only(run_branch).await {
+                warn!(
+                    run_id = %run_id,
+                    seq = self.seq,
+                    error = %format!("{e:#}"),
+                    prompt = %prompt.meta.name,
+                    "grind: parallel_safe contract violation (worktree sync)"
+                );
+                status = SessionStatus::Error;
+                summary = parallel_safe_violation_summary(
+                    &prompt.meta.name,
+                    ParallelSafeViolationSite::WorktreeSync,
+                );
+                sync_ok = false;
+            }
+        }
+
+        // Step 2 — commit on top of the synced HEAD. The per-session
+        // scratchpad lives at the worktree root and must stay out of
+        // the run-branch tree; the runner merges it back into the
+        // run-level scratchpad outside this method.
+        let pitboss_rel = Path::new(".pitboss");
+        let scratchpad_rel = Path::new(PER_SESSION_SCRATCHPAD);
+        let parallel_exclusions: [&Path; 2] = [pitboss_rel, scratchpad_rel];
+        if sync_ok {
+            commit = match status {
+                SessionStatus::Ok | SessionStatus::Error => {
+                    try_commit_session(g, self.seq, prompt, run_id, &parallel_exclusions).await?
+                }
+                _ => None,
+            };
+        }
+
+        // Step 3 — fast-forward the run branch to the session tip. The
+        // sync above guarantees this is a strict descendant unless
+        // run_branch raced forward between sync and merge — but the
+        // run_branch_lock prevents that.
+        if sync_ok && commit.is_some() {
+            if let Err(e) = repo_git.merge_ff_only(self.branch()).await {
+                warn!(
+                    run_id = %run_id,
+                    seq = self.seq,
+                    error = %format!("{e:#}"),
+                    prompt = %prompt.meta.name,
+                    "grind: parallel_safe contract violation (run-branch ff)"
+                );
+                status = SessionStatus::Error;
+                summary = parallel_safe_violation_summary(
+                    &prompt.meta.name,
+                    ParallelSafeViolationSite::RunBranchMerge,
+                );
+                commit = None;
+            }
+        }
+
+        // Step 4 — stash any leftover edits the agent left behind in
+        // the worktree so the directory is clean before teardown.
+        // Skipped when the sync failed (we never advanced HEAD, so the
+        // leftover is exactly what the agent wrote — quarantine will
+        // keep it). Same exclusions as the commit step so the
+        // per-session scratchpad survives the stash for the merge.
+        if sync_ok {
+            let stash_label = format!("grind/{}/session-{:04}-leftover", run_id, self.seq);
+            match g.stash_push(&stash_label, &parallel_exclusions).await {
+                Ok(true) => {
+                    warn!(
+                        run_id = %run_id,
+                        seq = self.seq,
+                        stash = %stash_label,
+                        "grind: leftover changes stashed (parallel)"
+                    );
+                    if status == SessionStatus::Ok {
+                        status = SessionStatus::Dirty;
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        run_id = %run_id,
+                        seq = self.seq,
+                        error = %format!("{e:#}"),
+                        "grind: stash_push failed (parallel) — treating as merge conflict"
+                    );
+                    if status == SessionStatus::Ok || status == SessionStatus::Dirty {
+                        status = SessionStatus::Error;
+                        summary = merge_conflict_summary(&prompt.meta.name, &e);
+                    }
+                }
+            }
+        }
+
+        Ok(MergeOutcome {
+            status,
+            summary,
+            commit,
+            sync_ok,
+        })
+    }
+}
+
+/// Result of the parallel-session merge dance.
+///
+/// Returned by [`SessionWorktree::merge_into`] so the runner folds a single
+/// value back into the session record instead of mutating four locals across
+/// branching git steps.
+#[derive(Debug, Clone)]
+pub struct MergeOutcome {
+    /// Final session status after sync → commit → ff-merge → stash.
+    pub status: SessionStatus,
+    /// Final summary text. Carries the `parallel_safe` violation label or the
+    /// merge-conflict diagnostic when the dance promoted the status to
+    /// `Error`; otherwise the caller's starting summary is returned verbatim.
+    pub summary: String,
+    /// Commit produced by the session (if any). `None` when the agent made no
+    /// code changes, when the dance promoted the status to a terminal failure
+    /// before the commit step, or when the run-branch ff-merge refused.
+    pub commit: Option<CommitId>,
+    /// `true` when the worktree-sync step (step 1) succeeded — i.e., the
+    /// run-branch tip was successfully replayed into the session worktree.
+    /// `false` short-circuits steps 2-4 and tells the runner to quarantine
+    /// the worktree without further git churn.
+    pub sync_ok: bool,
+}
+
+/// Stage and commit any code changes a grind session produced. Returns the
+/// new commit id, or `None` if there was nothing code-side to commit (e.g.,
+/// the agent only edited `.pitboss/`).
+///
+/// `exclude` is the per-call exclusion set forwarded to
+/// [`Git::stage_changes`]. Sequential sessions pass just `.pitboss/`;
+/// parallel sessions also pass the per-session `scratchpad.md` so the
+/// worktree-rooted scratchpad never lands in the run-branch tree (it lives
+/// outside git's history; pitboss merges it back via [`merge_scratchpad_into_run`]).
+pub(crate) async fn try_commit_session<G: Git + ?Sized>(
+    git: &G,
+    seq: u32,
+    prompt: &PromptDoc,
+    run_id: &str,
+    exclude: &[&Path],
+) -> Result<Option<CommitId>> {
+    git.stage_changes(exclude)
+        .await
+        .with_context(|| format!("grind: staging session {seq} changes"))?;
+
+    let has_staged = git
+        .has_staged_changes()
+        .await
+        .with_context(|| format!("grind: checking staged changes for session {seq}"))?;
+    if !has_staged {
+        debug!(seq, prompt = %prompt.meta.name, "grind: no code changes to commit");
+        return Ok(None);
+    }
+
+    let message = format!(
+        "[pitboss/grind] {} session-{:04} ({})",
+        prompt.meta.name, seq, run_id,
+    );
+    let id = git
+        .commit(&message)
+        .await
+        .with_context(|| format!("grind: committing session {seq}"))?;
+    Ok(Some(id))
+}
+
+/// Summary text recorded when a session ends with a working-tree state that
+/// `git stash push` cannot capture (most commonly an unresolved merge / index
+/// conflict the agent left behind). The next session's pre-flight reads the
+/// status field on the prior record to know the tree it inherits had to be
+/// rolled back. Kept short so it renders cleanly in `sessions.md`.
+pub(crate) fn merge_conflict_summary(prompt_name: &str, err: &anyhow::Error) -> String {
+    let one_line = format!("{err:#}")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if one_line.is_empty() {
+        format!("merge conflict at session end (prompt {prompt_name})")
+    } else {
+        format!("merge conflict at session end (prompt {prompt_name}): {one_line}")
+    }
 }
 
 /// Sweep stale parallel-session worktrees left behind by an interrupted
@@ -303,12 +526,51 @@ pub fn session_branch_name(run_id: &str, seq: u32) -> String {
     format!("pitboss/grind/{run_id}-session-{seq:04}")
 }
 
-/// Formatted error message used when `git merge --ff-only <session_branch>`
-/// fails. The runner records a `SessionStatus::Error` with this text as the
-/// session summary so `pitboss grind` users can grep for the contract
-/// violation.
-pub fn parallel_safe_violation_summary(prompt_name: &str) -> String {
-    format!("parallel_safe contract violated by prompt {prompt_name}")
+/// Which step of the merge dance produced a `parallel_safe` contract violation.
+///
+/// The runner enforces `parallel_safe: true` at two distinct sites:
+///
+/// - [`Self::WorktreeSync`]: bringing the current run-branch tip into the
+///   session worktree (`merge_ff_only(&run_branch)`) refused, meaning the
+///   agent's uncommitted edits would have been overwritten by another
+///   parallel session's commit.
+/// - [`Self::RunBranchMerge`]: fast-forwarding the run branch to the session
+///   tip refused. The run-branch lock prevents this from racing in normal
+///   operation, so it should only fire when an external writer advanced the
+///   run branch out of band.
+///
+/// Both kinds get the same `SessionStatus::Error` outcome; the labeled summary
+/// just lets users tell the two cases apart when triaging a failed run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelSafeViolationSite {
+    /// `git merge --ff-only <run_branch>` inside the session worktree refused.
+    WorktreeSync,
+    /// `git merge --ff-only <session_branch>` against the run branch refused.
+    RunBranchMerge,
+}
+
+impl ParallelSafeViolationSite {
+    fn label(self) -> &'static str {
+        match self {
+            ParallelSafeViolationSite::WorktreeSync => "worktree sync",
+            ParallelSafeViolationSite::RunBranchMerge => "run-branch merge",
+        }
+    }
+}
+
+/// Formatted error message used when one of the two `merge --ff-only` steps
+/// in the parallel-session dance fails. The runner records a
+/// `SessionStatus::Error` with this text as the session summary so
+/// `pitboss grind` users can grep for the contract violation and tell the two
+/// failure sites apart.
+pub fn parallel_safe_violation_summary(
+    prompt_name: &str,
+    site: ParallelSafeViolationSite,
+) -> String {
+    format!(
+        "parallel_safe contract violated by prompt {prompt_name} ({})",
+        site.label()
+    )
 }
 
 /// Merge the per-session scratchpad view back into the run-level scratchpad.
@@ -469,10 +731,30 @@ mod tests {
     }
 
     #[test]
-    fn parallel_safe_violation_summary_names_prompt() {
+    fn merge_conflict_summary_names_prompt_and_includes_first_error_line() {
+        let err = anyhow!("stash failed\nstderr: CONFLICT (content)");
+        let s = merge_conflict_summary("fp-hunter", &err);
+        assert!(s.contains("fp-hunter"), "summary missing prompt name: {s}");
+        assert!(s.contains("merge conflict"), "summary missing label: {s}");
+        assert!(
+            s.contains("stash failed"),
+            "summary missing first err line: {s}"
+        );
+        assert!(
+            !s.contains("CONFLICT"),
+            "summary leaked tail of multi-line err: {s}"
+        );
+    }
+
+    #[test]
+    fn parallel_safe_violation_summary_names_prompt_and_site() {
         assert_eq!(
-            parallel_safe_violation_summary("fp-hunter"),
-            "parallel_safe contract violated by prompt fp-hunter"
+            parallel_safe_violation_summary("fp-hunter", ParallelSafeViolationSite::WorktreeSync),
+            "parallel_safe contract violated by prompt fp-hunter (worktree sync)"
+        );
+        assert_eq!(
+            parallel_safe_violation_summary("fp-hunter", ParallelSafeViolationSite::RunBranchMerge),
+            "parallel_safe contract violated by prompt fp-hunter (run-branch merge)"
         );
     }
 

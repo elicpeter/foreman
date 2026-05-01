@@ -20,7 +20,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use pitboss::agent::{Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason};
@@ -39,11 +39,23 @@ const RUN_ID: &str = "20260430T180000Z-exit";
 /// plus an optional sleep before completing. Each tick of the script
 /// consumes one entry; if the script runs dry the agent reports
 /// `StopReason::Completed` with zero tokens.
+///
+/// Sleeps and any optional gate await race the dispatch [`CancellationToken`]
+/// so a test that fires `shutdown.abort()` mid-dispatch sees the agent
+/// short-circuit with [`StopReason::Cancelled`] — the same behavior the
+/// production `ClaudeCodeAgent` exhibits when killed by a signal.
 #[derive(Clone)]
 struct ScriptedAgent {
     name: String,
     script: Arc<Vec<ScriptStep>>,
     invocations: Arc<AtomicU32>,
+    /// Optional pair of channels for tests that need a deterministic sync
+    /// point per session: the agent posts the 1-based dispatch number on
+    /// `started_tx` after writing summary/marker, then awaits one permit on
+    /// `proceed` (cancellable via `cancel`). Mirrors the gated MockAgent in
+    /// `tests/grind_smoke.rs` so a test can pin the abort to a specific
+    /// dispatch.
+    gate: Option<(mpsc::UnboundedSender<u32>, Arc<Semaphore>)>,
 }
 
 #[derive(Clone)]
@@ -85,7 +97,19 @@ impl ScriptedAgent {
             name: "scripted".into(),
             script: Arc::new(steps),
             invocations,
+            gate: None,
         }
+    }
+
+    fn gated(
+        steps: Vec<ScriptStep>,
+        invocations: Arc<AtomicU32>,
+        started_tx: mpsc::UnboundedSender<u32>,
+        proceed: Arc<Semaphore>,
+    ) -> Self {
+        let mut me = Self::new(steps, invocations);
+        me.gate = Some((started_tx, proceed));
+        me
     }
 }
 
@@ -99,7 +123,7 @@ impl Agent for ScriptedAgent {
         &self,
         req: AgentRequest,
         events: mpsc::Sender<AgentEvent>,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> Result<AgentOutcome> {
         let n = self.invocations.fetch_add(1, Ordering::SeqCst) as usize;
         let step = self
@@ -151,8 +175,44 @@ impl Agent for ScriptedAgent {
             std::fs::write(summary_file, body).ok();
         }
 
+        // Sleep is cancellable so a mid-dispatch abort short-circuits to
+        // `StopReason::Cancelled` instead of waiting out the full duration
+        // (or being killed by the runner's outer timeout, which would
+        // surface as `Timeout` and miss the abort path entirely).
         if let Some(d) = step.sleep {
-            tokio::time::sleep(d).await;
+            tokio::select! {
+                _ = tokio::time::sleep(d) => {}
+                _ = cancel.cancelled() => {
+                    return Ok(AgentOutcome {
+                        exit_code: -1,
+                        stop_reason: StopReason::Cancelled,
+                        tokens: TokenUsage::default(),
+                        log_path: req.log_path,
+                    });
+                }
+            }
+        }
+
+        // Optional gate: signal to the test that dispatch reached the end of
+        // the agent body, then block on a permit. The wait races the cancel
+        // token so a test can deterministically prove that an abort fired
+        // *while the agent was inside this dispatch* (not before it started
+        // and not after it returned).
+        if let Some((started_tx, proceed)) = &self.gate {
+            let _ = started_tx.send(n as u32 + 1);
+            let permit = tokio::select! {
+                p = proceed.clone().acquire_owned() => p,
+                _ = cancel.cancelled() => {
+                    return Ok(AgentOutcome {
+                        exit_code: -1,
+                        stop_reason: StopReason::Cancelled,
+                        tokens: TokenUsage::default(),
+                        log_path: req.log_path,
+                    });
+                }
+            }
+            .expect("proceed semaphore closed unexpectedly");
+            permit.forget();
         }
 
         let _ = events
@@ -382,6 +442,80 @@ async fn aborted_when_shutdown_abort_fires() {
     assert_eq!(outcome.stop_reason, GrindStopReason::Aborted);
     let code = classify_outcome(&outcome.stop_reason, &outcome.sessions);
     assert_eq!(code, ExitCode::Aborted);
+}
+
+/// Exit code 2 again, but this time the abort fires *while the agent is
+/// running* — the in-flight cancellation path the previous test could not
+/// reach. Uses the gated [`ScriptedAgent`] so the test holds the agent inside
+/// dispatch until `shutdown.abort()` lands; the agent's gate-await races the
+/// cancel token, returns `StopReason::Cancelled`, and the runner records the
+/// session as `SessionStatus::Aborted`.
+#[tokio::test]
+async fn aborted_when_shutdown_abort_fires_during_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let invocations = Arc::new(AtomicU32::new(0));
+    let prompts = vec![fake_prompt("alpha", None)];
+    let plan = default_plan_from_dir(&prompts);
+
+    // One step: agent reports `Completed` if the gate releases before the
+    // abort, but the gated path lets the test guarantee the abort wins by
+    // never adding a permit.
+    let script = vec![ScriptStep {
+        stop: StopReason::Completed,
+        ..Default::default()
+    }];
+
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel::<u32>();
+    let proceed = Arc::new(Semaphore::new(0));
+    let agent = ScriptedAgent::gated(script, invocations.clone(), started_tx, proceed.clone());
+    let branch = pitboss::grind::run_branch_name(RUN_ID);
+    let mut runner = build_runner(
+        dir.path(),
+        &branch,
+        prompts,
+        plan,
+        agent,
+        PlanBudgets::default(),
+        3,
+    )
+    .await;
+
+    let shutdown = GrindShutdown::new();
+    let runner_shutdown = shutdown.clone();
+    let runner_handle =
+        tokio::spawn(async move { runner.run(runner_shutdown).await.unwrap() });
+
+    // Wait until dispatch 1 reports it has reached the gate, *then* abort.
+    // The gate-await is racing the cancel token in the agent body, so the
+    // abort lands while the agent is genuinely in flight.
+    let n = started_rx.recv().await.expect("dispatch 1 start signal");
+    assert_eq!(n, 1, "expected start signal from dispatch 1");
+    shutdown.abort();
+
+    let outcome = runner_handle.await.expect("runner task panicked");
+
+    // The session was in flight when the abort fired, so it lands as
+    // `Aborted` (not `Ok`, not `Error`, not `Timeout`).
+    assert_eq!(
+        outcome.sessions.len(),
+        1,
+        "expected exactly one session record, got {}",
+        outcome.sessions.len()
+    );
+    assert_eq!(
+        outcome.sessions[0].status,
+        SessionStatus::Aborted,
+        "in-flight cancellation must land as Aborted: {:?}",
+        outcome.sessions[0]
+    );
+    assert_eq!(outcome.stop_reason, GrindStopReason::Aborted);
+    let code = classify_outcome(&outcome.stop_reason, &outcome.sessions);
+    assert_eq!(code, ExitCode::Aborted);
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        1,
+        "exactly one dispatch should have fired"
+    );
 }
 
 /// Exit code 3: a run-level budget tripped. `--max-iterations 2` halts after

@@ -25,7 +25,8 @@ use pitboss::config::Config;
 use pitboss::git::{Git, ShellGit};
 use pitboss::grind::{
     parallel_safe_violation_summary, GrindPlan, GrindRunner, GrindShutdown, GrindStopReason,
-    Hooks, PlanBudgets, PlanPromptRef, PromptDoc, PromptMeta, PromptSource, RunDir, SessionStatus,
+    Hooks, ParallelSafeViolationSite, PlanBudgets, PlanPromptRef, PromptDoc, PromptMeta,
+    PromptSource, RunDir, SessionStatus,
 };
 
 /// Pre-canned per-prompt behavior for the [`MockAgent`]. Each prompt declares
@@ -44,7 +45,10 @@ struct PromptBehavior {
 }
 
 /// Records the number of in-flight sessions at the moment each agent was
-/// invoked. Drives the parallel-vs-sequential assertions below.
+/// invoked, plus the wall-clock interval of every session that ran. Drives
+/// the parallel-vs-sequential assertions below — including the overlap-based
+/// proof of parallelism that replaces the previous flaky wall-clock fraction
+/// assertion (see `deferred.md`).
 #[derive(Debug, Default)]
 struct ConcurrencyJournal {
     /// Currently-in-flight session count.
@@ -54,10 +58,16 @@ struct ConcurrencyJournal {
     /// Per-prompt list of (in_flight at start) snapshots so the test can ask
     /// "what siblings were running when this prompt started?"
     by_prompt: Mutex<HashMap<String, Vec<usize>>>,
+    /// Per-session-key (prompt:seq) start instants captured at enter; popped
+    /// at leave to land in `intervals` paired with the leave instant.
+    pending_starts: Mutex<HashMap<String, Instant>>,
+    /// Closed intervals (entered, left). Drives `max_overlap`, which proves
+    /// parallelism without depending on summed-sleep wall-clock arithmetic.
+    intervals: Mutex<Vec<(Instant, Instant)>>,
 }
 
 impl ConcurrencyJournal {
-    fn enter(&self, prompt: &str) -> usize {
+    fn enter(&self, prompt: &str, seq: &str) -> usize {
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         loop {
             let prev = self.max_in_flight.load(Ordering::SeqCst);
@@ -78,11 +88,19 @@ impl ConcurrencyJournal {
             .entry(prompt.to_string())
             .or_default()
             .push(now);
+        self.pending_starts
+            .lock()
+            .unwrap()
+            .insert(session_key(prompt, seq), Instant::now());
         now
     }
 
-    fn leave(&self) {
+    fn leave(&self, prompt: &str, seq: &str) {
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        let key = session_key(prompt, seq);
+        if let Some(start) = self.pending_starts.lock().unwrap().remove(&key) {
+            self.intervals.lock().unwrap().push((start, Instant::now()));
+        }
     }
 
     fn max(&self) -> usize {
@@ -97,6 +115,35 @@ impl ConcurrencyJournal {
             .cloned()
             .unwrap_or_default()
     }
+
+    /// Largest pairwise overlap across every closed session interval.
+    ///
+    /// Returns `Duration::ZERO` when fewer than two sessions ran or when no
+    /// pair overlapped on the wall clock. Used to prove parallelism directly
+    /// — `max_overlap > sleep / 2` is far more robust than `elapsed < 0.75 *
+    /// sum(sleeps)`, which falls apart when per-session git overhead climbs
+    /// on a slow CI host.
+    fn max_overlap(&self) -> Duration {
+        let intervals = self.intervals.lock().unwrap().clone();
+        let mut best = Duration::ZERO;
+        for (i, a) in intervals.iter().enumerate() {
+            for b in intervals.iter().skip(i + 1) {
+                let lo = a.0.max(b.0);
+                let hi = a.1.min(b.1);
+                if hi > lo {
+                    let d = hi - lo;
+                    if d > best {
+                        best = d;
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+fn session_key(prompt: &str, seq: &str) -> String {
+    format!("{prompt}#{seq}")
 }
 
 struct MockAgent {
@@ -133,7 +180,7 @@ impl Agent for MockAgent {
         let prompt_name = req.env.get("PITBOSS_PROMPT_NAME").cloned().unwrap_or_default();
         let seq = req.env.get("PITBOSS_SESSION_SEQ").cloned().unwrap_or_default();
 
-        let _ = self.journal.enter(&prompt_name);
+        let _ = self.journal.enter(&prompt_name, &seq);
 
         let behavior = self
             .behaviors
@@ -194,7 +241,7 @@ impl Agent for MockAgent {
             )))
             .await;
 
-        self.journal.leave();
+        self.journal.leave(&prompt_name, &seq);
 
         Ok(AgentOutcome {
             exit_code: 0,
@@ -491,9 +538,18 @@ async fn parallel_safe_violation_when_two_sessions_modify_the_same_file() {
         outcome.sessions
     );
     let err_summary = errors[0].summary.as_deref().unwrap_or("");
+    // The conflict scenario (both prompts mutating the same tracked file)
+    // trips the worktree-sync ff-merge: when the loser tries to bring the
+    // winner's run-branch tip into its worktree, the agent's local edit
+    // would be overwritten. The run-branch ff-merge variant is held off by
+    // the run-branch lock and only fires under external interference.
     assert!(
-        err_summary == parallel_safe_violation_summary(&errors[0].prompt),
-        "summary should label the violation: got {err_summary:?}"
+        err_summary
+            == parallel_safe_violation_summary(
+                &errors[0].prompt,
+                ParallelSafeViolationSite::WorktreeSync
+            ),
+        "summary should label the worktree-sync violation: got {err_summary:?}"
     );
     assert!(
         errors[0].commit.is_none(),
@@ -580,11 +636,16 @@ async fn parallel_wall_clock_is_meaningfully_less_than_sum_of_session_times() {
     let prompts = vec![parallel_prompt("alpha"), parallel_prompt("bravo")];
     let plan = plan_with(&prompts, 2);
 
-    // 1.2s per session — long enough that the per-session git overhead
-    // (worktree create, ff-merge, cleanup) does not dominate the elapsed
-    // time. Sum of sleeps is 2.4s; truly serialized execution lands above
-    // that, parallel execution lands around one sleep plus overhead.
-    let session_sleep = Duration::from_millis(1200);
+    // Each session sleeps 600ms inside the agent. The previous version of
+    // this test compared elapsed wall-clock against `0.75 * sum(sleeps)`,
+    // which flaked on slow CI hosts because per-session git overhead
+    // (worktree create + ff-merge + teardown) ate into the safety margin.
+    // The new assertion is overlap-driven: the journal records each
+    // session's enter/leave instants, and we require their intervals to
+    // overlap by at least half the per-session sleep — direct evidence of
+    // concurrent execution that does not depend on summed-time arithmetic
+    // or guess at the overhead budget.
+    let session_sleep = Duration::from_millis(600);
     let mut behaviors: HashMap<String, PromptBehavior> = HashMap::new();
     behaviors.insert(
         "alpha".to_string(),
@@ -613,23 +674,34 @@ async fn parallel_wall_clock_is_meaningfully_less_than_sum_of_session_times() {
 
     assert_eq!(outcome.stop_reason, GrindStopReason::Completed);
     assert_eq!(outcome.sessions.len(), 2);
-    let sum_of_sleeps = session_sleep * 2;
-    // Threshold: < 75% of the summed sleep durations. Parallel execution
-    // should land around one sleep plus per-session git overhead (worktree
-    // creation, ff-merge, teardown — measured at ~400ms wall-clock on
-    // local development hardware), which is comfortably below 75% of the
-    // serial lower bound.
-    let threshold = sum_of_sleeps.mul_f32(0.75);
-    assert!(
-        elapsed < threshold,
-        "expected parallelism: elapsed = {elapsed:?}, threshold = {threshold:?} (sum = {sum_of_sleeps:?})"
-    );
-    // Sanity: in-flight count peaked at 2.
+
+    // Strong instrumentation assertion: in-flight count peaked at 2.
     assert_eq!(
         journal.max(),
         2,
         "expected two concurrent sessions: max_in_flight = {}",
         journal.max()
+    );
+
+    // Direct overlap proof: the two session intervals must overlap by at
+    // least half the per-session sleep. On a host where the sessions
+    // genuinely interleave, overlap lands close to `session_sleep` itself;
+    // on a serialized run it would be zero.
+    let overlap = journal.max_overlap();
+    let min_overlap = session_sleep / 2;
+    assert!(
+        overlap >= min_overlap,
+        "expected overlap ≥ {min_overlap:?}, got {overlap:?} (sleep = {session_sleep:?}, elapsed = {elapsed:?})"
+    );
+
+    // Cheap sanity bound: even with generous overhead, two parallel
+    // sessions cannot take longer than serial execution. Loose enough that
+    // a slow CI host won't flake; tight enough to catch a regression that
+    // accidentally serializes the dispatch.
+    let serial_upper_bound = session_sleep * 2;
+    assert!(
+        elapsed < serial_upper_bound,
+        "elapsed {elapsed:?} ≥ serial bound {serial_upper_bound:?} — parallelism likely broken"
     );
 }
 
