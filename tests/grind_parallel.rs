@@ -737,8 +737,12 @@ async fn parallel_wall_clock_is_meaningfully_less_than_sum_of_session_times() {
     // Cheap sanity bound: even with generous overhead, two parallel
     // sessions cannot take longer than serial execution. Loose enough that
     // a slow CI host won't flake; tight enough to catch a regression that
-    // accidentally serializes the dispatch.
-    let serial_upper_bound = session_sleep * 2 + Duration::from_millis(800);
+    // accidentally serializes the dispatch. The overlap assertion above is
+    // the real correctness gate; this bound only catches a fully serialized
+    // dispatch, where the elapsed would be roughly `session_sleep * 2 +
+    // 2 * git_overhead`. Slack widened from 800ms after a loaded host
+    // observed elapsed=2.24s on a healthy parallel run.
+    let serial_upper_bound = session_sleep * 2 + Duration::from_millis(1500);
     assert!(
         elapsed < serial_upper_bound,
         "elapsed {elapsed:?} ≥ serial bound {serial_upper_bound:?} — parallelism likely broken"

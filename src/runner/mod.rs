@@ -351,6 +351,32 @@ pub struct Runner<A: Agent, G: Git> {
     /// the working tree, running tests would only re-confirm whatever the
     /// pre-run state was and risk halting the dry-run on a flaky suite.
     skip_tests: bool,
+    /// Operator-supplied override for the deferred-sweep gate. Driven by
+    /// `pitboss play --no-sweep` and `--sweep`; defaults to
+    /// [`SweepOverride::None`] which lets the configured trigger run.
+    sweep_override: SweepOverride,
+}
+
+/// Operator-supplied override for the deferred-sweep trigger.
+///
+/// Set via [`Runner::skip_sweep`] / [`Runner::force_sweep`] (mirrored on the
+/// CLI as `pitboss play --no-sweep` / `--sweep`). The two flags are mutually
+/// exclusive at the clap level, so the runner only ever sees one of these
+/// applied per invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepOverride {
+    /// Honor the configured sweep trigger (default).
+    None,
+    /// Suppress sweeps for the duration of the run. Clears `pending_sweep`
+    /// at the top of the run and refuses to arm it from any subsequent phase
+    /// commit. The override is not persisted to `pitboss.toml`.
+    Skip,
+    /// Force a sweep before the next phase even if the trigger threshold
+    /// isn't met. Sets `pending_sweep = true` at the top of the run and
+    /// bypasses the trigger re-evaluation in the gate so the sweep dispatches
+    /// once. After it lands `pending_sweep` clears normally and the
+    /// post-phase trigger reverts to the configured behavior.
+    Force,
 }
 
 impl<A: Agent, G: Git> Runner<A, G> {
@@ -379,6 +405,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             git,
             events_tx,
             skip_tests: false,
+            sweep_override: SweepOverride::None,
         }
     }
 
@@ -390,6 +417,33 @@ impl<A: Agent, G: Git> Runner<A, G> {
     /// considered.
     pub fn skip_tests(mut self, skip: bool) -> Self {
         self.skip_tests = skip;
+        self
+    }
+
+    /// Suppress deferred sweeps for the duration of this runner. Mirrors the
+    /// CLI flag `pitboss play --no-sweep`: clears `state.pending_sweep`
+    /// immediately so an inherited obligation from a prior run is dropped,
+    /// and refuses to arm the gate from any subsequent phase commit. The
+    /// override is in-memory only — it does not write to `pitboss.toml`.
+    pub fn skip_sweep(mut self, skip: bool) -> Self {
+        if skip {
+            self.sweep_override = SweepOverride::Skip;
+            self.state.pending_sweep = false;
+        }
+        self
+    }
+
+    /// Force a sweep before the next phase, regardless of the configured
+    /// trigger threshold. Mirrors `pitboss play --sweep`: sets
+    /// `state.pending_sweep = true` so the gate fires on the next
+    /// [`Runner::run_phase`], and bypasses the gate's trigger re-evaluation
+    /// so a backlog below `trigger_min_items` still sweeps once. Mutually
+    /// exclusive with [`Runner::skip_sweep`] (enforced at the CLI layer).
+    pub fn force_sweep(mut self, force: bool) -> Self {
+        if force {
+            self.sweep_override = SweepOverride::Force;
+            self.state.pending_sweep = true;
+        }
         self
     }
 
@@ -529,19 +583,34 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 }
             };
             let parsed = deferred::parse(&on_disk).unwrap_or_else(|_| self.deferred.clone());
-            if sweep::should_run_deferred_sweep(
-                &parsed,
-                &self.config.sweep,
-                self.state.consecutive_sweeps,
-            ) {
+            // `--no-sweep` shouldn't have left `pending_sweep` armed (the
+            // builder clears it), but defend against an externally set flag
+            // by short-circuiting here. `--sweep` bypasses the trigger so a
+            // forced sweep below the threshold still fires once.
+            let allow = match self.sweep_override {
+                SweepOverride::Skip => false,
+                SweepOverride::Force => true,
+                SweepOverride::None => sweep::should_run_deferred_sweep(
+                    &parsed,
+                    &self.config.sweep,
+                    self.state.consecutive_sweeps,
+                ),
+            };
+            if allow {
                 self.deferred = parsed;
-                let after = self
-                    .state
-                    .completed
-                    .last()
-                    .cloned()
-                    .ok_or_else(|| anyhow!("pending_sweep set but no completed phase"))?;
-                return self.run_sweep_step(after).await;
+                // For runs that have at least one completed phase, anchor
+                // the sweep on it. For a forced sweep before the very
+                // first phase commits (a `--sweep` on a fresh run), there
+                // is nothing to anchor on, so accounting falls back to the
+                // plan's current phase and the prompt label renders the
+                // standalone "no preceding phase" variant.
+                let prompt_after = self.state.completed.last().cloned();
+                let accounting = prompt_after
+                    .clone()
+                    .unwrap_or_else(|| self.plan.current_phase.clone());
+                return self
+                    .run_sweep_step_inner(accounting, prompt_after, None)
+                    .await;
             } else {
                 self.state.pending_sweep = false;
                 state::save(&self.workspace, Some(&self.state))
@@ -630,12 +699,17 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 .context("runner: writing plan.md with advanced current_phase")?;
             // Only consider scheduling a between-phase sweep when there is a
             // next phase to insert it before. End-of-run sweeps (after the
-            // final phase) belong to phase 08.
-            if sweep::should_run_deferred_sweep(
-                &self.deferred,
-                &self.config.sweep,
-                self.state.consecutive_sweeps,
-            ) {
+            // final phase) belong to phase 08. `--no-sweep` suppresses
+            // arming entirely; `--sweep` is consumed by the gate above (and
+            // would already have fired by the time we get here), so the
+            // post-phase trigger reverts to the configured behavior.
+            if !matches!(self.sweep_override, SweepOverride::Skip)
+                && sweep::should_run_deferred_sweep(
+                    &self.deferred,
+                    &self.config.sweep,
+                    self.state.consecutive_sweeps,
+                )
+            {
                 self.state.pending_sweep = true;
             }
         }
@@ -827,18 +901,59 @@ impl<A: Agent, G: Git> Runner<A, G> {
             .join(format!("sweep-after-{}-{}-{}.log", after, role, attempt))
     }
 
-    /// Run a deferred-sweep dispatch between two regular phases.
+    /// Run a one-shot deferred sweep against the loaded state without
+    /// advancing the plan state machine. Backs the `pitboss sweep`
+    /// subcommand: an operator who edited `deferred.md` by hand or wants to
+    /// drain a backlog ahead of the next `pitboss play` can invoke this in
+    /// isolation.
+    ///
+    /// `after` is the prompt's `after_phase` label — when `None`, the sweep
+    /// prompt renders the standalone variant ("no preceding phase to anchor
+    /// on"). Accounting (attempts counter, log filename, events, commit
+    /// message) falls back to the plan's current phase when no `after` is
+    /// supplied so the dispatch still has a stable phase id to key on.
+    ///
+    /// `max_items` clamps the prompt's pending-items list to the first N
+    /// items in document order without changing the on-disk file. Use it to
+    /// keep a pathological backlog (100+ items) within the agent's effective
+    /// context window; remaining items surface on the next sweep.
+    pub async fn run_standalone_sweep(
+        &mut self,
+        after: Option<PhaseId>,
+        max_items: Option<usize>,
+    ) -> Result<PhaseResult> {
+        let accounting = after
+            .clone()
+            .unwrap_or_else(|| self.plan.current_phase.clone());
+        self.run_sweep_step_inner(accounting, after, max_items).await
+    }
+
+    /// Shared body of the inter-phase sweep gate (in
+    /// [`Runner::run_phase_inner`]) and [`Runner::run_standalone_sweep`].
     ///
     /// The sweep reuses [`Runner::run_dispatch_pipeline`] with `phase: None`
     /// and `audit: Some(AuditKind::Sweep { .. })` when
-    /// [`crate::config::SweepConfig::audit_enabled`] is on. The
-    /// implementer's prompt is built via
-    /// [`prompts::sweep`]; if tests fail post-dispatch the fixer falls back to
-    /// [`prompts::fixer_for_sweep`] inside the pipeline. `state.attempts` is
-    /// keyed under `after` (the most recently completed real phase) so
-    /// sweep dispatches share the same attempts budget as the phase they
-    /// follow.
-    async fn run_sweep_step(&mut self, after: PhaseId) -> Result<PhaseResult> {
+    /// [`crate::config::SweepConfig::audit_enabled`] is on. The implementer's
+    /// prompt is built via [`prompts::sweep`]; if tests fail post-dispatch
+    /// the fixer falls back to [`prompts::fixer_for_sweep`] inside the
+    /// pipeline.
+    ///
+    /// `accounting` is the phase id used everywhere a sweep needs a stable
+    /// key — `state.attempts`, the per-attempt log filename, the
+    /// `Sweep{Started,Halted,Completed}` events, and the sweep commit
+    /// message. `prompt_after` is what the implementer / auditor / fixer
+    /// prompts read as the `{after}` substitution; `None` selects the
+    /// standalone-sweep variant in [`prompts::sweep`]. `max_items`, when
+    /// `Some(n)`, clamps the pending-items list passed into
+    /// [`prompts::sweep`] to the first `n` pending items in document order.
+    /// The on-disk `deferred.md` is unchanged: items dropped from the prompt
+    /// view stay in the file and surface on the next sweep.
+    async fn run_sweep_step_inner(
+        &mut self,
+        accounting: PhaseId,
+        prompt_after: Option<PhaseId>,
+        max_items: Option<usize>,
+    ) -> Result<PhaseResult> {
         // Capture pre-sweep accounting. `pre_unchecked` drives the resolved
         // count for the commit message; `pre_texts` is threaded into
         // [`AuditKind::Sweep`] so the auditor pass can diff it against the
@@ -874,26 +989,30 @@ impl<A: Agent, G: Git> Runner<A, G> {
             // pre_texts.
             self.apply_sweep_staleness(&pre_texts);
             return Ok(PhaseResult::Halted {
-                phase_id: after,
+                phase_id: accounting,
                 reason,
             });
         }
 
-        let attempt = self.bump_attempts(&after);
+        let attempt = self.bump_attempts(&accounting);
         let _ = self.events_tx.send(Event::SweepStarted {
-            after: after.clone(),
+            after: accounting.clone(),
             items_pending: pre_unchecked,
             attempt,
         });
 
         let stale = self.stale_items();
+        let prompt_doc = match max_items {
+            Some(n) => clamp_pending_items(&self.deferred, n),
+            None => self.deferred.clone(),
+        };
         let request = AgentRequest {
             role: Role::Implementer,
             model: self.config.models.implementer.clone(),
             system_prompt: prompts::caveman::system_prompt(&self.config.caveman),
-            user_prompt: prompts::sweep(&self.plan, &self.deferred, Some(&after), &stale),
+            user_prompt: prompts::sweep(&self.plan, &prompt_doc, prompt_after.as_ref(), &stale),
             workdir: self.workspace.clone(),
-            log_path: self.sweep_log_path(&after, "implementer", attempt),
+            log_path: self.sweep_log_path(&accounting, "implementer", attempt),
             timeout: DEFAULT_AGENT_TIMEOUT,
             env: std::collections::HashMap::new(),
         };
@@ -901,13 +1020,13 @@ impl<A: Agent, G: Git> Runner<A, G> {
         let exclude: [&Path; 1] = [Path::new(".pitboss")];
         let spec = DispatchSpec {
             request,
-            phase_id: after.clone(),
+            phase_id: accounting.clone(),
             phase: None,
             plan_path: &plan_path,
             deferred_path: &deferred_path,
             exclude_paths: &exclude,
             audit: self.config.sweep.audit_enabled.then(|| AuditKind::Sweep {
-                after: after.clone(),
+                after: accounting.clone(),
                 pre_texts: pre_texts.clone(),
             }),
         };
@@ -924,11 +1043,11 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 // get pruned, items that survived get incremented.
                 self.apply_sweep_staleness(&pre_texts);
                 let _ = self.events_tx.send(Event::SweepHalted {
-                    after: after.clone(),
+                    after: accounting.clone(),
                     reason: reason.clone(),
                 });
                 return Ok(PhaseResult::Halted {
-                    phase_id: after,
+                    phase_id: accounting,
                     reason,
                 });
             }
@@ -941,7 +1060,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
         let post_phases = phases_block_canonical(&self.deferred);
         if post_phases != pre_phases {
             warn!(
-                after = %after,
+                after = %accounting,
                 "sweep modified ## Deferred phases; restoring deferred.md"
             );
             self.restore_deferred(&deferred_path, &pre_deferred_bytes, true)?;
@@ -955,11 +1074,11 @@ impl<A: Agent, G: Git> Runner<A, G> {
             self.apply_sweep_staleness(&pre_texts);
             let reason = HaltReason::DeferredInvalid("sweep modified Deferred phases".into());
             let _ = self.events_tx.send(Event::SweepHalted {
-                after: after.clone(),
+                after: accounting.clone(),
                 reason: reason.clone(),
             });
             return Ok(PhaseResult::Halted {
-                phase_id: after,
+                phase_id: accounting,
                 reason,
             });
         }
@@ -972,12 +1091,12 @@ impl<A: Agent, G: Git> Runner<A, G> {
         let commit = if has_changes {
             let id = self
                 .git
-                .commit(&git::commit_message_sweep(&after, resolved))
+                .commit(&git::commit_message_sweep(&accounting, resolved))
                 .await
                 .context("runner: committing sweep")?;
             Some(id)
         } else {
-            warn!(after = %after, "sweep produced no code changes; skipping commit");
+            warn!(after = %accounting, "sweep produced no code changes; skipping commit");
             None
         };
 
@@ -1007,13 +1126,13 @@ impl<A: Agent, G: Git> Runner<A, G> {
             .context("runner: persisting state.json after sweep")?;
 
         let _ = self.events_tx.send(Event::SweepCompleted {
-            after: after.clone(),
+            after: accounting.clone(),
             resolved,
             commit: commit.clone(),
         });
 
         Ok(PhaseResult::Advanced {
-            phase_id: after,
+            phase_id: accounting,
             next_phase: Some(self.plan.current_phase.clone()),
             commit,
         })
@@ -1451,6 +1570,35 @@ impl<A: Agent, G: Git> Runner<A, G> {
             _role: role,
         })
     }
+}
+
+/// Clone `doc` and keep only the first `max` pending items (in document
+/// order). Already-checked items are filtered out by the sweep prompt
+/// renderer, so they're left alone here. `## Deferred phases` are preserved
+/// verbatim — the sweep prompt forbids editing them and the auditor cross-
+/// checks against the full file.
+///
+/// Used by [`Runner::run_standalone_sweep`] (and any future
+/// `--max-items`-style truncation) to keep a pathological backlog within
+/// the agent's effective context window without touching disk: the original
+/// `deferred.md` is unchanged, so items not in the prompt view stay pending
+/// for the next sweep.
+fn clamp_pending_items(doc: &DeferredDoc, max: usize) -> DeferredDoc {
+    let mut out = DeferredDoc {
+        items: Vec::with_capacity(doc.items.len().min(max + 1)),
+        phases: doc.phases.clone(),
+    };
+    let mut pending_kept = 0usize;
+    for item in &doc.items {
+        if !item.done {
+            if pending_kept >= max {
+                continue;
+            }
+            pending_kept += 1;
+        }
+        out.items.push(item.clone());
+    }
+    out
 }
 
 /// Canonical serialization of just the `## Deferred phases` block of a
