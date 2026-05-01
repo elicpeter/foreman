@@ -78,6 +78,43 @@ const SESSION_LOG_TAIL_LINES: usize = 50;
 /// leaves `max_session_seconds` unset.
 const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(60 * 30);
 
+/// Fixer-role prompt rendered for `verify: true` sessions whose post-dispatch
+/// test run fails. Mirrors the runner's fixer prompt in shape but is scoped to
+/// the grind context (no plan, no phase, no `deferred.md`). Placeholders are
+/// substituted by [`render_grind_fixer_prompt`].
+const GRIND_FIXER_PROMPT_TEMPLATE: &str = "You are the fixer agent for pitboss grind. \
+The implementer agent just finished session prompt {prompt_name} and the project's test \
+suite failed. Your job is to fix the code so the suite passes, without expanding scope.
+
+# Hard rules
+
+1. Never edit anything under `.pitboss/`.
+2. Stay focused on the failing tests below. Do not refactor passing code.
+3. Default assumption: the code is wrong, not the test. If a test asserts the wrong \
+invariant, fix it only when you can articulate why in a comment.
+
+# Original prompt body
+
+````
+{prompt_body}
+````
+
+# Test output
+
+````
+{test_output}
+````
+";
+
+/// Render the grind fixer prompt for a failing verify cycle. Public for
+/// snapshot tests; not part of the supported API surface.
+pub fn render_grind_fixer_prompt(prompt_name: &str, prompt_body: &str, test_output: &str) -> String {
+    GRIND_FIXER_PROMPT_TEMPLATE
+        .replace("{prompt_name}", prompt_name)
+        .replace("{prompt_body}", prompt_body)
+        .replace("{test_output}", test_output)
+}
+
 /// Standing-instruction text rendered into the agent's prompt body. Stable so
 /// callers (and tests) can grep for it. Public for snapshot tests; not part of
 /// the supported API surface.
@@ -918,6 +955,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
             None => read_summary_or_fallback(&summary_path),
         };
 
+        let mut verify_extra_tokens = TokenUsage::default();
         if status == SessionStatus::Ok && prompt.meta.verify {
             // Parallel sessions run in their own worktree; pointing
             // CARGO_TARGET_DIR back at the main workspace's `target/` lets
@@ -927,15 +965,24 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
             let shared_target_dir = worktree
                 .as_ref()
                 .map(|_| repo_root.join("target"));
-            status = verify_session(
+            let verify = verify_with_fixer_loop(
                 seq,
                 &prompt,
                 &workdir_for_agent,
-                config.tests.command.as_deref(),
+                &config,
                 &transcript_path,
                 shared_target_dir.as_deref(),
+                &*agent,
+                shutdown.cancel_token(),
+                &base_env,
             )
             .await?;
+            status = verify.status;
+            if let Some(s) = verify.summary_override {
+                summary = s;
+            }
+            verify_extra_tokens = verify.extra_tokens;
+            cost_usd += verify.extra_cost_usd;
         }
 
         // Commit + stash. Sequential and parallel sessions share the same
@@ -1005,6 +1052,16 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
         }
 
         tokens = dispatch.tokens;
+        // Fold any tokens consumed by the verify cycle's fixer dispatches so
+        // the session record carries a single, accurate tokens / cost figure
+        // covering the implementer plus every fixer attempt.
+        tokens.input = tokens.input.saturating_add(verify_extra_tokens.input);
+        tokens.output = tokens.output.saturating_add(verify_extra_tokens.output);
+        for (k, v) in verify_extra_tokens.by_role {
+            let entry = tokens.by_role.entry(k).or_default();
+            entry.input = entry.input.saturating_add(v.input);
+            entry.output = entry.output.saturating_add(v.output);
+        }
     }
 
     // ---- per-session scratchpad merge (parallel only) ----------------
@@ -1109,53 +1166,235 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
     })
 }
 
-/// Auto-detect the project's test runner and run it once. Returns
-/// [`SessionStatus::Ok`] when tests pass and [`SessionStatus::Error`] when
-/// they fail. Reuse of the existing fixer cycle is deferred (see
-/// `deferred.md`).
+/// Outcome of [`verify_with_fixer_loop`]. Folded into the surrounding session
+/// record so the fixer's tokens / cost / final status all show up in the
+/// `sessions.jsonl` line for the original prompt.
+#[derive(Debug)]
+struct VerifyOutcome {
+    /// Final session status after any fixer dispatches.
+    status: SessionStatus,
+    /// Replacement summary when the verify cycle ends in failure. `None`
+    /// leaves the original session summary intact.
+    summary_override: Option<String>,
+    /// Tokens consumed by every fixer dispatch in the loop, summed across
+    /// attempts. Folded onto the implementer's tokens by the caller.
+    extra_tokens: TokenUsage,
+    /// Cost added by every fixer dispatch in the loop.
+    extra_cost_usd: f64,
+}
+
+impl VerifyOutcome {
+    fn ok() -> Self {
+        Self {
+            status: SessionStatus::Ok,
+            summary_override: None,
+            extra_tokens: TokenUsage::default(),
+            extra_cost_usd: 0.0,
+        }
+    }
+}
+
+/// Run the project's test suite for a `verify: true` session and, on failure,
+/// dispatch the fixer agent up to [`crate::config::RetryBudgets::fixer_max_attempts`]
+/// times before recording the session as [`SessionStatus::Error`].
 ///
-/// `shared_target_dir`, when `Some`, layers `CARGO_TARGET_DIR=<path>` onto
-/// the spawned process. Used by parallel sessions to point each worktree's
+/// `shared_target_dir`, when `Some`, layers `CARGO_TARGET_DIR=<path>` onto the
+/// test process. Used by parallel sessions to point each worktree's
 /// `cargo test` at the main workspace's `target/` so they share the
-/// incremental cache instead of paying a full rebuild per worktree.
-/// Non-cargo runners ignore the env var.
-async fn verify_session(
+/// incremental cache instead of paying a full rebuild per worktree. Non-cargo
+/// runners ignore the env var.
+///
+/// The fixer prompt is rendered from [`GRIND_FIXER_PROMPT_TEMPLATE`] and
+/// dispatched against [`crate::config::ModelRoles::fixer`]. Each attempt
+/// re-runs the test suite; the first passing run resolves the verify cycle as
+/// `Ok`. Tokens consumed by every fixer dispatch are accumulated in the
+/// returned [`VerifyOutcome`] so the caller can fold them onto the session
+/// total. A cancelled fixer dispatch surfaces as `Aborted`; an erroring
+/// dispatch (timeout / non-zero exit / agent failure) bails the loop with
+/// `Error`.
+#[allow(clippy::too_many_arguments)]
+async fn verify_with_fixer_loop<A: Agent + ?Sized>(
     seq: u32,
     prompt: &PromptDoc,
     workdir: &Path,
-    override_command: Option<&str>,
+    config: &Config,
     transcript_path: &Path,
     shared_target_dir: Option<&Path>,
-) -> Result<SessionStatus> {
-    let Some(mut runner) = project_tests::detect(workdir, override_command) else {
+    agent: &A,
+    cancel: &CancellationToken,
+    base_env: &HashMap<String, String>,
+) -> Result<VerifyOutcome> {
+    let Some(test_runner) = project_tests::detect(workdir, config.tests.command.as_deref()) else {
         debug!(
             seq,
             prompt = %prompt.meta.name,
             "grind: verify requested but no test runner detected"
         );
-        return Ok(SessionStatus::Ok);
+        return Ok(VerifyOutcome::ok());
     };
-    if let Some(target) = shared_target_dir {
-        let mut env = HashMap::new();
-        env.insert("CARGO_TARGET_DIR".to_string(), target.display().to_string());
-        runner = runner.with_env(env);
-    }
+    let test_runner = match shared_target_dir {
+        Some(target) => {
+            let mut env = HashMap::new();
+            env.insert("CARGO_TARGET_DIR".to_string(), target.display().to_string());
+            test_runner.with_env(env)
+        }
+        None => test_runner,
+    };
+
     let verify_log = transcript_path.with_extension("verify.log");
-    let outcome = runner
+    let mut outcome = test_runner
         .run(verify_log)
         .await
         .with_context(|| format!("grind: verify run for session {seq}"))?;
     if outcome.passed {
-        Ok(SessionStatus::Ok)
-    } else {
+        return Ok(VerifyOutcome::ok());
+    }
+
+    let max_attempts = config.retries.fixer_max_attempts;
+    if max_attempts == 0 {
         warn!(
             seq,
             prompt = %prompt.meta.name,
             summary = %outcome.summary,
-            "grind: verify failed"
+            "grind: verify failed (fixer disabled)"
         );
-        Ok(SessionStatus::Error)
+        return Ok(VerifyOutcome {
+            status: SessionStatus::Error,
+            summary_override: Some(format!("verify failed: {}", outcome.summary)),
+            extra_tokens: TokenUsage::default(),
+            extra_cost_usd: 0.0,
+        });
     }
+
+    let mut total_tokens = TokenUsage::default();
+    let mut total_cost = 0.0;
+    let model = config.models.fixer.clone();
+    let dispatch_timeout = prompt
+        .meta
+        .max_session_seconds
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_SESSION_TIMEOUT);
+
+    for attempt in 1..=max_attempts {
+        if cancel.is_cancelled() {
+            return Ok(VerifyOutcome {
+                status: SessionStatus::Aborted,
+                summary_override: Some("verify aborted before fixer attempt".into()),
+                extra_tokens: total_tokens,
+                extra_cost_usd: total_cost,
+            });
+        }
+        info!(
+            seq,
+            prompt = %prompt.meta.name,
+            attempt,
+            "grind: verify failed; dispatching fixer"
+        );
+
+        let user_prompt =
+            render_grind_fixer_prompt(&prompt.meta.name, &prompt.body, &outcome.summary);
+        let log_path = transcript_path.with_extension(format!("fix-{:02}.log", attempt));
+        let request = AgentRequest {
+            role: Role::Fixer,
+            model: model.clone(),
+            system_prompt: String::new(),
+            user_prompt,
+            workdir: workdir.to_path_buf(),
+            log_path,
+            timeout: dispatch_timeout,
+            env: base_env.clone(),
+        };
+
+        let dispatch = dispatch_agent(agent, request, cancel).await?;
+        total_tokens.input = total_tokens.input.saturating_add(dispatch.tokens.input);
+        total_tokens.output = total_tokens.output.saturating_add(dispatch.tokens.output);
+        for (k, v) in &dispatch.tokens.by_role {
+            let entry = total_tokens.by_role.entry(k.clone()).or_default();
+            entry.input = entry.input.saturating_add(v.input);
+            entry.output = entry.output.saturating_add(v.output);
+        }
+        total_cost += session_cost_usd(config, &model, dispatch.tokens.input, dispatch.tokens.output);
+
+        match &dispatch.stop_reason {
+            StopReason::Completed => {}
+            StopReason::Cancelled => {
+                return Ok(VerifyOutcome {
+                    status: SessionStatus::Aborted,
+                    summary_override: Some("verify aborted during fixer dispatch".into()),
+                    extra_tokens: total_tokens,
+                    extra_cost_usd: total_cost,
+                });
+            }
+            StopReason::Timeout => {
+                warn!(
+                    seq,
+                    prompt = %prompt.meta.name,
+                    attempt,
+                    "grind: fixer dispatch timed out"
+                );
+                return Ok(VerifyOutcome {
+                    status: SessionStatus::Error,
+                    summary_override: Some(format!("fixer attempt {attempt} timed out")),
+                    extra_tokens: total_tokens,
+                    extra_cost_usd: total_cost,
+                });
+            }
+            StopReason::Error(msg) => {
+                warn!(
+                    seq,
+                    prompt = %prompt.meta.name,
+                    attempt,
+                    error = %msg,
+                    "grind: fixer dispatch failed"
+                );
+                return Ok(VerifyOutcome {
+                    status: SessionStatus::Error,
+                    summary_override: Some(format!("fixer attempt {attempt} failed: {msg}")),
+                    extra_tokens: total_tokens,
+                    extra_cost_usd: total_cost,
+                });
+            }
+        }
+
+        let attempt_log = transcript_path.with_extension(format!("verify-{:02}.log", attempt));
+        outcome = test_runner
+            .run(attempt_log)
+            .await
+            .with_context(|| {
+                format!("grind: verify re-run after fixer attempt {attempt} for session {seq}")
+            })?;
+        if outcome.passed {
+            info!(
+                seq,
+                prompt = %prompt.meta.name,
+                attempt,
+                "grind: verify passed after fixer"
+            );
+            return Ok(VerifyOutcome {
+                status: SessionStatus::Ok,
+                summary_override: None,
+                extra_tokens: total_tokens,
+                extra_cost_usd: total_cost,
+            });
+        }
+    }
+
+    warn!(
+        seq,
+        prompt = %prompt.meta.name,
+        max_attempts,
+        summary = %outcome.summary,
+        "grind: verify still failing after fixer budget"
+    );
+    Ok(VerifyOutcome {
+        status: SessionStatus::Error,
+        summary_override: Some(format!(
+            "verify failed after {max_attempts} fixer attempts: {}",
+            outcome.summary
+        )),
+        extra_tokens: total_tokens,
+        extra_cost_usd: total_cost,
+    })
 }
 
 async fn dispatch_agent<A: Agent + ?Sized>(
@@ -1370,5 +1609,21 @@ mod tests {
         s2.abort();
         assert!(s.is_draining());
         assert!(s.cancel_token().is_cancelled());
+    }
+
+    #[test]
+    fn grind_fixer_prompt_substitutes_all_placeholders() {
+        let rendered = render_grind_fixer_prompt(
+            "fp-hunter",
+            "Find every false-positive lint warning and silence it.",
+            "test_widget ... FAILED\n  expected 5, got 6",
+        );
+        assert!(rendered.contains("fp-hunter"));
+        assert!(rendered.contains("Find every false-positive"));
+        assert!(rendered.contains("test_widget ... FAILED"));
+        // No placeholder leakage.
+        assert!(!rendered.contains("{prompt_name}"));
+        assert!(!rendered.contains("{prompt_body}"));
+        assert!(!rendered.contains("{test_output}"));
     }
 }

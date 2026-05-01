@@ -124,11 +124,11 @@ fn dry_run_with_no_prompts_exits_failed_to_start() {
 }
 
 #[test]
-fn dry_run_with_resume_is_rejected() {
-    // The dry-run preview is computed from a fresh `SchedulerState`, so
-    // combining it with --resume would silently surface picks that diverge
-    // from what the resumed run actually picks next. The CLI rejects the
-    // combination up front rather than producing a misleading report.
+fn dry_run_with_resume_no_runs_reports_failed_to_start() {
+    // `--dry-run --resume` is allowed but still needs a resumable run on disk
+    // — without one we surface the same "no resumable grind run found" error
+    // the live resume path produces, mapped to exit 4. This pins the CLI
+    // wiring after the rejection from earlier phases was lifted.
     let work = tempdir().unwrap();
     let home = tempdir().unwrap();
     seed_three_prompts(work.path());
@@ -137,7 +137,85 @@ fn dry_run_with_resume_is_rejected() {
         .args(["grind", "--dry-run", "--resume"])
         .assert()
         .code(4)
-        .stderr(contains("--dry-run with --resume is not supported"));
+        .stderr(contains("no resumable grind run found"));
+}
+
+#[test]
+fn dry_run_with_resume_seeds_preview_from_persisted_state() {
+    // Happy path: a resumable run exists on disk. `--dry-run --resume` should
+    // load it, validate the prompt set, and emit a report whose `## Resume`
+    // section mirrors the persisted budget snapshot. The preview reflects the
+    // resumed scheduler state rather than starting at rotation 0.
+    use chrono::Utc;
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::PathBuf;
+
+    let work = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    seed_three_prompts(work.path());
+
+    let run_id = "20260430T180000Z-dryresume";
+    let run_dir = pitboss::grind::RunDir::create(work.path(), run_id).unwrap();
+
+    // Seed three matching session records into sessions.jsonl so the
+    // reconciler (which compares state.last_session_seq against the JSONL
+    // tail) sees an aligned snapshot.
+    let log = run_dir.log();
+    for (seq, prompt) in [(1u32, "alpha"), (2u32, "bravo"), (3u32, "alpha")] {
+        let rec = pitboss::grind::SessionRecord {
+            seq,
+            run_id: run_id.to_string(),
+            prompt: prompt.to_string(),
+            started_at: Utc::now(),
+            ended_at: Utc::now(),
+            status: pitboss::grind::SessionStatus::Ok,
+            summary: Some(format!("session {seq}")),
+            commit: None,
+            tokens: pitboss::state::TokenUsage {
+                input: 1000,
+                output: 500,
+                by_role: HashMap::new(),
+            },
+            cost_usd: 0.4,
+            transcript_path: PathBuf::from(format!("transcripts/session-{seq:04}.log")),
+        };
+        log.append(&rec).unwrap();
+    }
+
+    let mut runs: BTreeMap<String, u32> = BTreeMap::new();
+    runs.insert("alpha".to_string(), 2);
+    runs.insert("bravo".to_string(), 1);
+    let state = pitboss::grind::RunState {
+        run_id: run_id.to_string(),
+        branch: format!("pitboss/grind/{run_id}"),
+        plan_name: "default".to_string(),
+        prompt_names: vec!["alpha".to_string(), "bravo".to_string(), "charlie".to_string()],
+        scheduler_state: pitboss::grind::SchedulerState {
+            rotation: 3,
+            runs_per_prompt: runs,
+        },
+        budget_consumed: pitboss::grind::BudgetSnapshot {
+            iterations: 3,
+            tokens_input: 3000,
+            tokens_output: 1500,
+            cost_usd: 1.2,
+            consecutive_failures: 0,
+        },
+        last_session_seq: 3,
+        started_at: Utc::now(),
+        last_updated_at: Utc::now(),
+        status: pitboss::grind::RunStatus::Aborted,
+    };
+    state.write(run_dir.paths()).unwrap();
+
+    isolated(work.path(), home.path())
+        .args(["grind", "--dry-run", "--resume", run_id])
+        .assert()
+        .success()
+        .stdout(contains("## Resume"))
+        .stdout(contains("last_session_seq: 3"))
+        .stdout(contains("iterations_consumed: 3"))
+        .stdout(contains("resumed scheduler state"));
 }
 
 #[test]

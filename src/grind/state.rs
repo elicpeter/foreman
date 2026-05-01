@@ -16,6 +16,7 @@
 //! to re-aggregate every JSONL line on startup. Writes are atomic via
 //! [`crate::util::write_atomic`] and happen after every session.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -26,8 +27,10 @@ use serde::{Deserialize, Serialize};
 use crate::util::write_atomic;
 
 use super::budget::BudgetSnapshot;
-use super::run_dir::{RunPaths, STATE_FILENAME};
-use super::scheduler::SchedulerState;
+use super::plan::GrindPlan;
+use super::prompt::PromptDoc;
+use super::run_dir::{RunPaths, SessionRecord, SessionStatus, STATE_FILENAME};
+use super::scheduler::{Scheduler, SchedulerState};
 
 /// Lifecycle status persisted with [`RunState`]. The resume entry-point picks
 /// the most-recent run whose status is [`RunStatus::Active`] (still running
@@ -344,32 +347,118 @@ pub fn validate_resume(
     Ok(listing)
 }
 
-/// Cross-check the cached `state.json.last_session_seq` against the actual
-/// tail of `sessions.jsonl`. Returns `Ok(())` only when both agree; otherwise
-/// returns [`ResumeError::StateOutOfSync`] so the resume path can refuse to
-/// continue.
+/// Outcome of [`reconstruct_state_from_log`]. Carries the scheduler /
+/// budget snapshot the resumed runner should use plus the highest seq
+/// observed in `sessions.jsonl`. `records_replayed` is `0` when the cached
+/// `state.json` was already aligned with the log; `> 0` means the host
+/// process died between a JSONL append and the matching `state.json` write
+/// and we recovered by replaying the missing records through the scheduler.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReconciledState {
+    /// Scheduler state to seed [`Scheduler::with_state`] with.
+    pub scheduler_state: SchedulerState,
+    /// Budget snapshot to seed [`crate::grind::BudgetTracker::from_snapshot`] with.
+    pub budget_consumed: BudgetSnapshot,
+    /// Highest seq actually present in `sessions.jsonl`. Used as the new
+    /// `last_session_seq` so the resumed runner dispatches `last + 1` next.
+    pub last_session_seq: u32,
+    /// Number of session records the function replayed past the cached
+    /// `state.json`. `0` for the perfectly-aligned case.
+    pub records_replayed: usize,
+}
+
+/// Reconcile the cached `state.json` snapshot with the source-of-truth
+/// `sessions.jsonl` tail.
 ///
-/// `sessions.jsonl` is the source of truth (see `run_dir.rs` docs). A divergence
-/// means the host process crashed between the JSONL append for session N and
-/// the `state.json` write that would have advanced `last_session_seq` to N.
-/// Resuming with a stale `state.last_session_seq` would set
-/// `next_seq = stale + 1` and re-dispatch a session whose record already
-/// exists, producing two JSONL lines with the same `seq`.
-pub fn reconcile_state_with_log(
-    run_id: &str,
-    state_seq: u32,
-    log_records: &[super::run_dir::SessionRecord],
-) -> Result<(), ResumeError> {
+/// `sessions.jsonl` is appended to before `state.json` is written, so a host
+/// process that dies between the two produces a JSONL log that is one or more
+/// records ahead of `state.last_session_seq`. The historical behavior here was
+/// to refuse the resume in that case; now we replay the missing records
+/// through the scheduler so a single dropped `state.json` write doesn't strand
+/// the run. The reverse — `state.last_session_seq` claims more records than
+/// `sessions.jsonl` actually has — is genuinely broken (the cached scheduler
+/// state is ahead of the log) and still refuses with
+/// [`ResumeError::StateOutOfSync`].
+///
+/// Replay is conservative: each missing record is matched against the
+/// scheduler's next pick, and a divergence (different prompt name or scheduler
+/// exhaustion) refuses rather than silently producing a state that doesn't
+/// match what the original loop dispatched. In practice the scheduler is
+/// deterministic over `(plan, prompts, state)` so replay only diverges when
+/// a user has changed prompt frontmatter (weight / every / max_runs) between
+/// the original run and the resume.
+pub fn reconstruct_state_from_log(
+    state: &RunState,
+    log_records: &[SessionRecord],
+    plan: &GrindPlan,
+    prompts: &BTreeMap<String, PromptDoc>,
+) -> Result<ReconciledState, ResumeError> {
     let jsonl_seq = log_records.iter().map(|r| r.seq).max().unwrap_or(0);
-    if jsonl_seq == state_seq {
-        Ok(())
-    } else {
-        Err(ResumeError::StateOutOfSync {
-            run_id: run_id.to_string(),
-            state_seq,
-            jsonl_seq,
-        })
+    if jsonl_seq == state.last_session_seq {
+        return Ok(ReconciledState {
+            scheduler_state: state.scheduler_state.clone(),
+            budget_consumed: state.budget_consumed,
+            last_session_seq: state.last_session_seq,
+            records_replayed: 0,
+        });
     }
+    if jsonl_seq < state.last_session_seq {
+        return Err(ResumeError::StateOutOfSync {
+            run_id: state.run_id.clone(),
+            state_seq: state.last_session_seq,
+            jsonl_seq,
+        });
+    }
+
+    let mut missing: Vec<&SessionRecord> = log_records
+        .iter()
+        .filter(|r| r.seq > state.last_session_seq)
+        .collect();
+    missing.sort_by_key(|r| r.seq);
+
+    let mut sched = Scheduler::with_state(
+        plan.clone(),
+        prompts.clone(),
+        state.scheduler_state.clone(),
+    );
+    let mut budget = state.budget_consumed;
+
+    for rec in &missing {
+        let picked = sched.next();
+        match picked {
+            Some(p) if p.meta.name == rec.prompt => {
+                sched.record_run(&p.meta.name);
+            }
+            _ => {
+                return Err(ResumeError::StateOutOfSync {
+                    run_id: state.run_id.clone(),
+                    state_seq: state.last_session_seq,
+                    jsonl_seq,
+                });
+            }
+        }
+
+        budget.iterations = budget.iterations.saturating_add(1);
+        budget.tokens_input = budget.tokens_input.saturating_add(rec.tokens.input);
+        budget.tokens_output = budget.tokens_output.saturating_add(rec.tokens.output);
+        budget.cost_usd += rec.cost_usd;
+        match rec.status {
+            SessionStatus::Ok | SessionStatus::Dirty => {
+                budget.consecutive_failures = 0;
+            }
+            SessionStatus::Error | SessionStatus::Timeout => {
+                budget.consecutive_failures = budget.consecutive_failures.saturating_add(1);
+            }
+            SessionStatus::Aborted => {}
+        }
+    }
+
+    Ok(ReconciledState {
+        scheduler_state: sched.state().clone(),
+        budget_consumed: budget,
+        last_session_seq: jsonl_seq,
+        records_replayed: missing.len(),
+    })
 }
 
 /// Helper used by both initial-write and per-session-write paths. Builds a
@@ -632,73 +721,183 @@ mod tests {
     }
 
     fn fixture_session_record(seq: u32) -> super::super::run_dir::SessionRecord {
-        use super::super::run_dir::{SessionRecord, SessionStatus};
+        fixture_session_record_named(seq, "alpha", SessionStatus::Ok, 0, 0, 0.0)
+    }
+
+    fn fixture_session_record_named(
+        seq: u32,
+        prompt: &str,
+        status: SessionStatus,
+        input: u64,
+        output: u64,
+        cost: f64,
+    ) -> SessionRecord {
         use crate::git::CommitId;
         use crate::state::TokenUsage;
+        use std::collections::HashMap;
         use std::path::PathBuf;
         SessionRecord {
             seq,
             run_id: "rid".into(),
-            prompt: "alpha".into(),
+            prompt: prompt.into(),
             started_at: "2026-04-30T18:00:00Z".parse().unwrap(),
             ended_at: "2026-04-30T18:01:00Z".parse().unwrap(),
-            status: SessionStatus::Ok,
+            status,
             summary: Some(format!("session {seq}")),
             commit: Some(CommitId::new(format!("abc{seq:040}"))),
-            tokens: TokenUsage::default(),
-            cost_usd: 0.0,
+            tokens: TokenUsage {
+                input,
+                output,
+                by_role: HashMap::new(),
+            },
+            cost_usd: cost,
             transcript_path: PathBuf::from(format!("transcripts/session-{seq:04}.log")),
         }
     }
 
-    #[test]
-    fn reconcile_passes_when_state_seq_matches_jsonl_tail() {
-        let records = vec![
-            fixture_session_record(1),
-            fixture_session_record(2),
-            fixture_session_record(3),
-        ];
-        assert!(reconcile_state_with_log("rid", 3, &records).is_ok());
-    }
-
-    #[test]
-    fn reconcile_passes_on_empty_log_with_zero_state() {
-        let records: Vec<super::super::run_dir::SessionRecord> = Vec::new();
-        assert!(reconcile_state_with_log("rid", 0, &records).is_ok());
-    }
-
-    #[test]
-    fn reconcile_rejects_when_jsonl_has_more_sessions_than_state() {
-        // The dangerous case: process died between JSONL append and state.json
-        // write. State says we're at seq=2 but the log has seq=3 — resuming
-        // would re-dispatch the same prompt and write seq=3 twice.
-        let records = vec![
-            fixture_session_record(1),
-            fixture_session_record(2),
-            fixture_session_record(3),
-        ];
-        let err = reconcile_state_with_log("rid", 2, &records).unwrap_err();
-        match err {
-            ResumeError::StateOutOfSync {
-                run_id,
-                state_seq,
-                jsonl_seq,
-            } => {
-                assert_eq!(run_id, "rid");
-                assert_eq!(state_seq, 2);
-                assert_eq!(jsonl_seq, 3);
-            }
-            other => panic!("expected StateOutOfSync, got {other:?}"),
+    fn fixture_prompt(name: &str) -> PromptDoc {
+        use crate::grind::prompt::PromptMeta;
+        PromptDoc {
+            meta: PromptMeta {
+                name: name.into(),
+                description: format!("desc for {name}"),
+                weight: 1,
+                every: 1,
+                max_runs: None,
+                verify: false,
+                parallel_safe: false,
+                tags: vec![],
+                max_session_seconds: None,
+                max_session_cost_usd: None,
+            },
+            body: format!("body for {name}"),
+            source_path: PathBuf::from(format!("/fixture/{name}.md")),
+            source_kind: crate::grind::prompt::PromptSource::Project,
         }
     }
 
+    fn fixture_plan_one_prompt(name: &str) -> (GrindPlan, BTreeMap<String, PromptDoc>) {
+        use crate::grind::plan::default_plan_from_dir;
+        let prompts = vec![fixture_prompt(name)];
+        let plan = default_plan_from_dir(&prompts);
+        let lookup: BTreeMap<String, PromptDoc> =
+            prompts.into_iter().map(|p| (p.meta.name.clone(), p)).collect();
+        (plan, lookup)
+    }
+
+    fn fixture_state_aligned_with_log(records: &[SessionRecord]) -> RunState {
+        let mut state = fixture_state("rid", RunStatus::Active);
+        state.last_session_seq = records.iter().map(|r| r.seq).max().unwrap_or(0);
+        // Align the cached scheduler_state with what the original loop would
+        // have produced: every record bumps runs_per_prompt for its prompt
+        // and rotation goes up by one (every-gating is absent in fixtures).
+        let mut runs: BTreeMap<String, u32> = BTreeMap::new();
+        for r in records {
+            *runs.entry(r.prompt.clone()).or_default() += 1;
+        }
+        state.scheduler_state = SchedulerState {
+            rotation: records.len() as u64,
+            runs_per_prompt: runs,
+        };
+        state
+    }
+
     #[test]
-    fn reconcile_rejects_when_state_claims_more_than_jsonl_has() {
-        // The reverse mismatch: state claims a session that never made it to
-        // the log. Equally bad — the scheduler / budget snapshot is ahead of
-        // the source-of-truth log.
+    fn reconstruct_returns_identity_when_state_matches_jsonl_tail() {
+        let (plan, prompts) = fixture_plan_one_prompt("alpha");
+        let records = vec![
+            fixture_session_record(1),
+            fixture_session_record(2),
+            fixture_session_record(3),
+        ];
+        let state = fixture_state_aligned_with_log(&records);
+        let recon = reconstruct_state_from_log(&state, &records, &plan, &prompts).unwrap();
+        assert_eq!(recon.records_replayed, 0);
+        assert_eq!(recon.last_session_seq, 3);
+        assert_eq!(recon.scheduler_state, state.scheduler_state);
+    }
+
+    #[test]
+    fn reconstruct_passes_on_empty_log_with_zero_state() {
+        let (plan, prompts) = fixture_plan_one_prompt("alpha");
+        let records: Vec<SessionRecord> = Vec::new();
+        let mut state = fixture_state("rid", RunStatus::Active);
+        state.last_session_seq = 0;
+        state.scheduler_state = SchedulerState::default();
+        let recon = reconstruct_state_from_log(&state, &records, &plan, &prompts).unwrap();
+        assert_eq!(recon.records_replayed, 0);
+        assert_eq!(recon.last_session_seq, 0);
+    }
+
+    #[test]
+    fn reconstruct_replays_missing_records_when_jsonl_is_ahead() {
+        // The "single dropped state.json write" recovery path: state.json
+        // captured rotation=2 / runs[alpha]=2, the next session landed in the
+        // JSONL but the host died before state.json picked it up. We replay
+        // session 3 through the scheduler and recover.
+        let (plan, prompts) = fixture_plan_one_prompt("alpha");
+        let records = vec![
+            fixture_session_record_named(1, "alpha", SessionStatus::Ok, 100, 50, 0.01),
+            fixture_session_record_named(2, "alpha", SessionStatus::Ok, 100, 50, 0.01),
+            fixture_session_record_named(3, "alpha", SessionStatus::Ok, 200, 100, 0.02),
+        ];
+        let state = fixture_state_aligned_with_log(&records[..2]);
+        let original_budget = state.budget_consumed;
+        let recon = reconstruct_state_from_log(&state, &records, &plan, &prompts).unwrap();
+        assert_eq!(recon.records_replayed, 1);
+        assert_eq!(recon.last_session_seq, 3);
+        assert_eq!(recon.scheduler_state.rotation, 3);
+        assert_eq!(recon.scheduler_state.runs_per_prompt.get("alpha"), Some(&3));
+        assert_eq!(recon.budget_consumed.iterations, original_budget.iterations + 1);
+        assert_eq!(
+            recon.budget_consumed.tokens_input,
+            original_budget.tokens_input + 200
+        );
+        assert_eq!(
+            recon.budget_consumed.tokens_output,
+            original_budget.tokens_output + 100
+        );
+        assert!((recon.budget_consumed.cost_usd - (original_budget.cost_usd + 0.02)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reconstruct_resets_consecutive_failures_on_replayed_success() {
+        // Replayed Ok records reset the consecutive-failure counter, just like
+        // the live tracker would. This keeps the escape valve in sync after a
+        // recovery.
+        let (plan, prompts) = fixture_plan_one_prompt("alpha");
+        let records = vec![
+            fixture_session_record_named(1, "alpha", SessionStatus::Error, 0, 0, 0.0),
+            fixture_session_record_named(2, "alpha", SessionStatus::Ok, 0, 0, 0.0),
+        ];
+        let mut state = fixture_state_aligned_with_log(&records[..1]);
+        state.budget_consumed.consecutive_failures = 1;
+        let recon = reconstruct_state_from_log(&state, &records, &plan, &prompts).unwrap();
+        assert_eq!(recon.budget_consumed.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn reconstruct_rejects_when_state_claims_more_than_jsonl_has() {
+        let (plan, prompts) = fixture_plan_one_prompt("alpha");
         let records = vec![fixture_session_record(1)];
-        let err = reconcile_state_with_log("rid", 5, &records).unwrap_err();
+        let mut state = fixture_state_aligned_with_log(&records);
+        state.last_session_seq = 5;
+        let err = reconstruct_state_from_log(&state, &records, &plan, &prompts).unwrap_err();
+        assert!(matches!(err, ResumeError::StateOutOfSync { .. }));
+    }
+
+    #[test]
+    fn reconstruct_rejects_when_scheduler_diverges_from_recorded_prompt() {
+        // The recorded prompt name is unknown to the scheduler — replay can't
+        // match the source-of-truth log so we refuse rather than silently
+        // producing a state that doesn't reflect what the original dispatched.
+        let (plan, prompts) = fixture_plan_one_prompt("alpha");
+        let records = vec![
+            fixture_session_record_named(1, "alpha", SessionStatus::Ok, 0, 0, 0.0),
+            fixture_session_record_named(2, "ghost", SessionStatus::Ok, 0, 0, 0.0),
+        ];
+        let state = fixture_state_aligned_with_log(&records[..1]);
+        let err = reconstruct_state_from_log(&state, &records, &plan, &prompts).unwrap_err();
         assert!(matches!(err, ResumeError::StateOutOfSync { .. }));
     }
 }

@@ -21,9 +21,10 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 
+use super::budget::BudgetSnapshot;
 use super::plan::{GrindPlan, PlanBudgets};
 use super::prompt::{PromptDoc, PromptSource};
-use super::scheduler::Scheduler;
+use super::scheduler::{Scheduler, SchedulerState};
 
 /// Stable header line at the top of every dry-run report. Intentionally a
 /// single literal so a wrapping script can match on it deterministically.
@@ -60,6 +61,18 @@ pub struct DryRunInputs<'a> {
     pub consecutive_failure_limit: u32,
     /// Resume target if `--resume` is set. `None` for a fresh dry-run.
     pub resume_target: Option<&'a str>,
+    /// Persisted scheduler state when `--resume` is set. Seeds the preview
+    /// scheduler so the picks reflect where the resumed loop would actually
+    /// land instead of a fresh rotation. `None` for a fresh dry-run.
+    pub resume_scheduler_state: Option<&'a SchedulerState>,
+    /// Persisted cumulative budget consumption when `--resume` is set. Shown
+    /// in the `## Resume` section so the report surfaces what's already been
+    /// spent. `None` for a fresh dry-run.
+    pub resume_budget_consumed: Option<&'a BudgetSnapshot>,
+    /// Sequence number of the last session recorded for the resumed run, so
+    /// the user can see at a glance where the resumed loop will pick up.
+    /// `None` for a fresh dry-run.
+    pub resume_last_session_seq: Option<u32>,
 }
 
 /// Render the full dry-run report. Pure: depends only on `inputs`.
@@ -96,6 +109,29 @@ pub fn render_dry_run_report(inputs: &DryRunInputs<'_>) -> String {
         out.push_str(&format!("- resume target: {label}\n"));
     }
     out.push('\n');
+
+    if let Some(snap) = inputs.resume_budget_consumed {
+        out.push_str("## Resume\n\n");
+        if let Some(seq) = inputs.resume_last_session_seq {
+            out.push_str(&format!("- last_session_seq: {seq}\n"));
+        }
+        if let Some(state) = inputs.resume_scheduler_state {
+            out.push_str(&format!("- scheduler_rotation: {}\n", state.rotation));
+        }
+        out.push_str(&format!("- iterations_consumed: {}\n", snap.iterations));
+        out.push_str(&format!(
+            "- tokens_consumed: {} (input={}, output={})\n",
+            snap.tokens_input.saturating_add(snap.tokens_output),
+            snap.tokens_input,
+            snap.tokens_output,
+        ));
+        out.push_str(&format!("- cost_consumed_usd: ${:.4}\n", snap.cost_usd));
+        out.push_str(&format!(
+            "- consecutive_failures: {}\n",
+            snap.consecutive_failures
+        ));
+        out.push('\n');
+    }
 
     out.push_str("## Prompts\n\n");
     if inputs.prompts.is_empty() {
@@ -167,10 +203,19 @@ pub fn render_dry_run_report(inputs: &DryRunInputs<'_>) -> String {
     out.push('\n');
 
     out.push_str("## Scheduler preview\n\n");
-    out.push_str(&format!(
-        "Next {PREVIEW_PICK_COUNT} picks (frontmatter rules + plan overrides):\n",
-    ));
-    let picks = preview_picks(inputs.plan, inputs.prompts, PREVIEW_PICK_COUNT);
+    let preview_label = if inputs.resume_scheduler_state.is_some() {
+        format!("Next {PREVIEW_PICK_COUNT} picks (resumed scheduler state):")
+    } else {
+        format!("Next {PREVIEW_PICK_COUNT} picks (frontmatter rules + plan overrides):")
+    };
+    out.push_str(&preview_label);
+    out.push('\n');
+    let picks = preview_picks_from_state(
+        inputs.plan,
+        inputs.prompts,
+        inputs.resume_scheduler_state,
+        PREVIEW_PICK_COUNT,
+    );
     if picks.is_empty() {
         out.push_str("- (none — scheduler is exhausted from the first call)\n");
     } else {
@@ -195,11 +240,26 @@ pub fn preview_picks(
     prompts: &[PromptDoc],
     count: usize,
 ) -> Vec<Option<String>> {
+    preview_picks_from_state(plan, prompts, None, count)
+}
+
+/// Variant of [`preview_picks`] that seeds the scheduler from an explicit
+/// [`SchedulerState`] when `seed` is `Some`. Used by `--dry-run --resume` so
+/// the preview reflects the resumed loop's actual starting position.
+pub fn preview_picks_from_state(
+    plan: &GrindPlan,
+    prompts: &[PromptDoc],
+    seed: Option<&SchedulerState>,
+    count: usize,
+) -> Vec<Option<String>> {
     let lookup: BTreeMap<String, PromptDoc> = prompts
         .iter()
         .map(|p| (p.meta.name.clone(), p.clone()))
         .collect();
-    let mut sched = Scheduler::new(plan.clone(), lookup);
+    let mut sched = match seed {
+        Some(s) => Scheduler::with_state(plan.clone(), lookup, s.clone()),
+        None => Scheduler::new(plan.clone(), lookup),
+    };
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         let picked = sched.next();
@@ -319,6 +379,9 @@ mod tests {
             budgets: &budgets,
             consecutive_failure_limit: 3,
             resume_target: None,
+            resume_scheduler_state: None,
+            resume_budget_consumed: None,
+            resume_last_session_seq: None,
         };
         let report = render_dry_run_report(&inputs);
         insta::assert_snapshot!("dry_run_report_full_fixture", report);
@@ -343,9 +406,60 @@ mod tests {
             budgets: &PlanBudgets::default(),
             consecutive_failure_limit: 3,
             resume_target: Some(""),
+            resume_scheduler_state: None,
+            resume_budget_consumed: None,
+            resume_last_session_seq: None,
         };
         let report = render_dry_run_report(&inputs);
         insta::assert_snapshot!("dry_run_report_minimal_defaults", report);
+    }
+
+    #[test]
+    fn dry_run_report_snapshot_resume_preview() {
+        // `--dry-run --resume` should surface the resume target, the consumed
+        // budget snapshot, and a scheduler preview seeded from the persisted
+        // state — not a fresh rotation.
+        let prompts = vec![
+            fixture_prompt("alpha", 2, 1),
+            fixture_prompt("bravo", 1, 1),
+        ];
+        let plan = fixture_plan(&prompts);
+        let budgets = PlanBudgets {
+            max_iterations: Some(50),
+            until: None,
+            max_cost_usd: Some(12.5),
+            max_tokens: None,
+        };
+        // Seeded mid-rotation: alpha has been picked twice, bravo once. The
+        // preview should reflect this skew.
+        let mut runs = std::collections::BTreeMap::new();
+        runs.insert("alpha".to_string(), 2u32);
+        runs.insert("bravo".to_string(), 1u32);
+        let scheduler_state = SchedulerState {
+            rotation: 3,
+            runs_per_prompt: runs,
+        };
+        let snapshot = BudgetSnapshot {
+            iterations: 3,
+            tokens_input: 4000,
+            tokens_output: 2000,
+            cost_usd: 1.2345,
+            consecutive_failures: 0,
+        };
+        let inputs = DryRunInputs {
+            workspace: Path::new("/tmp/fixture-workspace"),
+            agent_backend: Some("claude_code"),
+            prompts: &prompts,
+            plan: &plan,
+            budgets: &budgets,
+            consecutive_failure_limit: 3,
+            resume_target: Some("20260430T180000Z-rsm1"),
+            resume_scheduler_state: Some(&scheduler_state),
+            resume_budget_consumed: Some(&snapshot),
+            resume_last_session_seq: Some(3),
+        };
+        let report = render_dry_run_report(&inputs);
+        insta::assert_snapshot!("dry_run_report_resume_preview", report);
     }
 
     #[test]
@@ -395,6 +509,9 @@ mod tests {
             budgets: &PlanBudgets::default(),
             consecutive_failure_limit: 3,
             resume_target: None,
+            resume_scheduler_state: None,
+            resume_budget_consumed: None,
+            resume_last_session_seq: None,
         };
         let report = render_dry_run_report(&inputs);
         let mut lines = report.lines();

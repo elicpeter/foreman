@@ -26,7 +26,7 @@ use crate::agent::{self, Agent};
 use crate::config::{self, Config};
 use crate::git::{self, Git, ShellGit};
 use crate::grind::{
-    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, reconcile_state_with_log,
+    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, reconstruct_state_from_log,
     render_dry_run_report, resolve_budgets, resolve_target, run_branch_name,
     sweep_stale_session_worktrees as pitboss_grind_sweep, validate_resume, DiscoveryOptions,
     DryRunInputs, ExitCode, GrindPlan, GrindRunner, GrindShutdown, GrindStopReason, PlanBudgets,
@@ -120,18 +120,6 @@ fn parse_rfc3339(s: &str) -> std::result::Result<DateTime<Utc>, String> {
 /// before any session is dispatched surface as
 /// [`ExitCode::FailedToStart`] with a stderr message.
 pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
-    // The dry-run report is computed from a fresh `SchedulerState`. Combining
-    // it with `--resume` would silently surface picks that diverge from what
-    // the resumed run actually picks next. Reject the combination until
-    // dry-run can load the persisted scheduler / budget snapshot.
-    if args.dry_run && args.resume.is_some() {
-        print_failed_to_start(
-            "--dry-run with --resume is not supported (the rotation preview \
-             would not reflect the persisted scheduler state)",
-        );
-        return Ok(ExitCode::FailedToStart);
-    }
-
     let config = match config::load(&workspace) {
         Ok(c) => c,
         Err(e) => {
@@ -159,31 +147,7 @@ pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
     }
 
     if args.dry_run {
-        // Resolve the same budget layering the real run would, so the report
-        // surfaces the budgets the runner *would* enforce — not just what was
-        // declared in any one source.
-        let cli_budgets = PlanBudgets {
-            max_iterations: args.max_iterations,
-            until: args.until,
-            max_tokens: args.max_tokens,
-            max_cost_usd: args.max_cost,
-        };
-        let budgets = resolve_budgets(&config.grind.budgets, &plan.budgets, &cli_budgets);
-        let inputs = DryRunInputs {
-            workspace: &workspace,
-            agent_backend: config.agent.backend.as_deref(),
-            prompts: &prompts,
-            plan: &plan,
-            budgets: &budgets,
-            consecutive_failure_limit: config.grind.consecutive_failure_limit,
-            resume_target: args.resume.as_deref(),
-        };
-        let report = render_dry_run_report(&inputs);
-        let stdout = std::io::stdout();
-        let mut h = stdout.lock();
-        h.write_all(report.as_bytes())
-            .context("grind: writing dry-run report to stdout")?;
-        return Ok(ExitCode::Success);
+        return run_dry_run(&workspace, &config, &plan, &prompts, &args);
     }
 
     let agent = match agent::build_agent(&config) {
@@ -200,6 +164,115 @@ pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
     }
 
     execute(workspace, config, plan, prompts, agent, &args).await
+}
+
+/// Render and print the `--dry-run` report. When `--resume` is also set, the
+/// report is seeded with the persisted scheduler / budget snapshot of the
+/// resume target so the preview reflects where the resumed loop would
+/// actually pick up — not a fresh rotation. Resume validation errors here
+/// surface as `FailedToStart` (exit 4) the same way `execute_resume` would.
+fn run_dry_run(
+    workspace: &Path,
+    config: &Config,
+    plan: &GrindPlan,
+    prompts: &[PromptDoc],
+    args: &GrindArgs,
+) -> Result<ExitCode> {
+    let cli_budgets = PlanBudgets {
+        max_iterations: args.max_iterations,
+        until: args.until,
+        max_tokens: args.max_tokens,
+        max_cost_usd: args.max_cost,
+    };
+    let budgets = resolve_budgets(&config.grind.budgets, &plan.budgets, &cli_budgets);
+
+    // Resolve the resume target up front so the dry-run preview is seeded
+    // from the persisted scheduler / budget snapshot when `--resume` is set.
+    let resume_payload = match args.resume.as_deref() {
+        None => None,
+        Some(target) => {
+            let requested = if target.is_empty() { None } else { Some(target) };
+            match resolve_resume_for_dry_run(workspace, plan, prompts, requested) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    print_failed_to_start(&render_resume_error(&e));
+                    return Ok(ExitCode::FailedToStart);
+                }
+            }
+        }
+    };
+
+    let inputs = DryRunInputs {
+        workspace,
+        agent_backend: config.agent.backend.as_deref(),
+        prompts,
+        plan,
+        budgets: &budgets,
+        consecutive_failure_limit: config.grind.consecutive_failure_limit,
+        resume_target: args.resume.as_deref(),
+        resume_scheduler_state: resume_payload.as_ref().map(|p| &p.scheduler_state),
+        resume_budget_consumed: resume_payload.as_ref().map(|p| &p.budget_consumed),
+        resume_last_session_seq: resume_payload.as_ref().map(|p| p.last_session_seq),
+    };
+    let report = render_dry_run_report(&inputs);
+    let stdout = std::io::stdout();
+    let mut h = stdout.lock();
+    h.write_all(report.as_bytes())
+        .context("grind: writing dry-run report to stdout")?;
+    Ok(ExitCode::Success)
+}
+
+/// Persisted snapshot a `--dry-run --resume` invocation needs to seed its
+/// preview. Owned (not borrowed) so the resolver can build the lookup
+/// internally and not leak the prompts BTreeMap into the caller.
+struct ResumeDryRunPayload {
+    scheduler_state: crate::grind::SchedulerState,
+    budget_consumed: crate::grind::BudgetSnapshot,
+    last_session_seq: u32,
+}
+
+fn resolve_resume_for_dry_run(
+    workspace: &Path,
+    plan: &GrindPlan,
+    prompts: &[PromptDoc],
+    requested: Option<&str>,
+) -> std::result::Result<ResumeDryRunPayload, ResumeError> {
+    let listing = resolve_target(workspace, requested)?;
+    let current_prompt_names: Vec<String> =
+        plan.prompts.iter().map(|p| p.name.clone()).collect();
+    let listing = validate_resume(listing, &plan.name, &current_prompt_names)?;
+
+    // Read the source-of-truth log so the preview reflects any sessions that
+    // landed in JSONL but didn't make it into state.json before the kill.
+    let run_dir = match RunDir::open(workspace, &listing.run_id) {
+        Ok(d) => d,
+        Err(e) => {
+            return Err(ResumeError::StateUnreadable {
+                run_id: listing.run_id.clone(),
+                source: e,
+            })
+        }
+    };
+    let log_records = match run_dir.log().records() {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(ResumeError::StateUnreadable {
+                run_id: listing.run_id.clone(),
+                source: e,
+            })
+        }
+    };
+    let prompts_lookup: BTreeMap<String, PromptDoc> = prompts
+        .iter()
+        .map(|p| (p.meta.name.clone(), p.clone()))
+        .collect();
+    let reconciled =
+        reconstruct_state_from_log(&listing.state, &log_records, plan, &prompts_lookup)?;
+    Ok(ResumeDryRunPayload {
+        scheduler_state: reconciled.scheduler_state,
+        budget_consumed: reconciled.budget_consumed,
+        last_session_seq: reconciled.last_session_seq,
+    })
 }
 
 async fn execute<A>(
@@ -359,12 +432,12 @@ where
         }
     };
 
-    // Cross-check the cached `state.last_session_seq` against the actual tail
-    // of `sessions.jsonl`. A mismatch means the host process died between the
-    // JSONL append and the state.json write — resuming with the stale cached
-    // seq would re-dispatch the missing session under a colliding seq, leaving
-    // two JSONL records with the same number. Better to refuse and let the
-    // user repair by hand than silently corrupt the log.
+    // Reconcile the cached state.json against the source-of-truth
+    // sessions.jsonl. If the host died between a JSONL append and the
+    // matching state.json write, replay the missing records through the
+    // scheduler so a single dropped write doesn't strand the run. The
+    // reverse mismatch (state claims more sessions than the log has) is
+    // genuinely broken and still refuses.
     let log_records = match run_dir.log().records() {
         Ok(r) => r,
         Err(e) => {
@@ -375,11 +448,25 @@ where
             return Ok(ExitCode::FailedToStart);
         }
     };
-    if let Err(e) =
-        reconcile_state_with_log(&listing.run_id, listing.state.last_session_seq, &log_records)
-    {
-        print_failed_to_start(&render_resume_error(&e));
-        return Ok(ExitCode::FailedToStart);
+    let prompts_map = into_lookup(prompts);
+    let reconciled = match reconstruct_state_from_log(
+        &listing.state,
+        &log_records,
+        &plan,
+        &prompts_map,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            print_failed_to_start(&render_resume_error(&e));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+    if reconciled.records_replayed > 0 {
+        info!(
+            run_id = %listing.run_id,
+            replayed = reconciled.records_replayed,
+            "grind: replayed missing JSONL records past state.json snapshot"
+        );
     }
 
     // Sweep parallel-session worktrees the original run left behind. If
@@ -396,7 +483,7 @@ where
         &sweep_git,
         run_dir.paths(),
         &listing.run_id,
-        listing.state.last_session_seq,
+        reconciled.last_session_seq,
     )
     .await;
     if removed > 0 {
@@ -416,7 +503,6 @@ where
     let budgets = resolve_budgets(&config.grind.budgets, &plan.budgets, &cli_budgets);
     let consecutive_failure_limit = config.grind.consecutive_failure_limit;
 
-    let prompts_map = into_lookup(prompts);
     let runner_git = ShellGit::new(workspace.clone());
     let plan_name = plan.name.clone();
     let RunListing {
@@ -436,16 +522,16 @@ where
         runner_git,
         budgets,
         consecutive_failure_limit,
-        state.scheduler_state,
-        state.budget_consumed,
-        state.last_session_seq,
+        reconciled.scheduler_state,
+        reconciled.budget_consumed,
+        reconciled.last_session_seq,
         state.started_at,
     );
 
     let shutdown = GrindShutdown::new();
     let signal_task = spawn_signal_handler(shutdown.clone());
 
-    announce_resume(&run_id, &state.branch, state.last_session_seq);
+    announce_resume(&run_id, &state.branch, reconciled.last_session_seq);
 
     let result = runner.run(shutdown.clone()).await;
 
