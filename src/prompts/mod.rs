@@ -33,6 +33,7 @@ const AUDITOR_TEMPLATE: &str = include_str!("templates/auditor.txt");
 const FIXER_TEMPLATE: &str = include_str!("templates/fixer.txt");
 const SWEEP_TEMPLATE: &str = include_str!("templates/sweep.txt");
 const SWEEP_FIXER_TEMPLATE: &str = include_str!("templates/sweep_fixer.txt");
+const SWEEP_AUDITOR_TEMPLATE: &str = include_str!("templates/sweep_auditor.txt");
 const PLANNER_TEMPLATE: &str = include_str!("templates/planner.txt");
 const QUESTIONER_TEMPLATE: &str = include_str!("templates/questioner.txt");
 
@@ -159,6 +160,53 @@ pub fn fixer_with_deferred(
             ("deferred", &serialize_deferred_for_prompt(deferred)),
         ],
     )
+}
+
+/// Render the sweep auditor prompt. Mirrors [`auditor_with_deferred`] but is
+/// scoped to a deferred-sweep dispatch instead of a plan phase. `resolved` is
+/// the list of `## Deferred items` text the sweep implementer flipped from
+/// `- [ ]` to `- [x]` in this dispatch; `remaining` is the unchecked-item text
+/// still pending after the sweep. `diff` is the staged `git diff --cached`.
+/// The auditor's contract is "for each resolved item, does the diff actually
+/// do that work? revert anything unrelated."
+pub fn sweep_auditor(
+    _plan: &Plan,
+    deferred: &DeferredDoc,
+    after: &PhaseId,
+    diff: &str,
+    resolved: &[String],
+    remaining: &[String],
+    small_fix_line_limit: usize,
+) -> String {
+    let limit = small_fix_line_limit.to_string();
+    let resolved_block = render_audit_item_list(resolved);
+    let remaining_block = render_audit_item_list(remaining);
+    render(
+        SWEEP_AUDITOR_TEMPLATE,
+        &[
+            ("after", after.as_str()),
+            ("diff", diff),
+            ("resolved", &resolved_block),
+            ("remaining", &remaining_block),
+            ("deferred", &serialize_deferred_for_prompt(deferred)),
+            ("small_fix_line_limit", &limit),
+        ],
+    )
+}
+
+/// Render an item-list block for the sweep auditor prompt. Empty slice maps to
+/// a visible `(none)` marker so the agent isn't tricked by a blank section.
+fn render_audit_item_list(items: &[String]) -> String {
+    if items.is_empty() {
+        return "(none)\n".to_string();
+    }
+    let mut out = String::new();
+    for text in items {
+        out.push_str("- ");
+        out.push_str(text);
+        out.push('\n');
+    }
+    out
 }
 
 /// Render the fixer prompt for the deferred-sweep pipeline. Used when a sweep
@@ -526,6 +574,7 @@ mod tests {
             ("fixer", FIXER_TEMPLATE),
             ("sweep", SWEEP_TEMPLATE),
             ("sweep_fixer", SWEEP_FIXER_TEMPLATE),
+            ("sweep_auditor", SWEEP_AUDITOR_TEMPLATE),
             ("planner", PLANNER_TEMPLATE),
             ("questioner", QUESTIONER_TEMPLATE),
         ] {
@@ -823,6 +872,66 @@ mod sweep {
         let plan = fixture_plan();
         let deferred = fixture_deferred();
         insta::assert_snapshot!(sweep(&plan, &deferred, None, &[]));
+    }
+
+    #[test]
+    fn sweep_auditor_renders_resolved_and_remaining() {
+        let plan = fixture_plan();
+        let deferred = fixture_deferred();
+        let after = pid("02");
+        let diff = "diff --git a/src/x.rs b/src/x.rs\n@@\n-old\n+new\n";
+        let resolved = vec![
+            "polish error message in PhaseId::parse".to_string(),
+            "drop unused stub in deferred::parse".to_string(),
+        ];
+        let remaining = vec![
+            "rename `flag` to `enabled` in audit config".to_string(),
+            "tighten test for empty deferred.md".to_string(),
+            "document sweep section in README".to_string(),
+        ];
+        let out = sweep_auditor(&plan, &deferred, &after, diff, &resolved, &remaining, 25);
+        assert!(out.contains("polish error message in PhaseId::parse"));
+        assert!(out.contains("rename `flag` to `enabled` in audit config"));
+        assert!(out.contains("Most recently completed phase: 02"));
+        assert!(out.contains("≤ 25 lines") || out.contains("25 lines"));
+        assert!(out.contains("-old\n+new"));
+        assert!(!out.contains("{resolved}"));
+        assert!(!out.contains("{remaining}"));
+        assert!(!out.contains("{after}"));
+        assert!(!out.contains("{diff}"));
+    }
+
+    #[test]
+    fn sweep_auditor_renders_empty_lists_with_marker() {
+        let plan = fixture_plan();
+        let deferred = fixture_deferred();
+        let after = pid("02");
+        let out = sweep_auditor(&plan, &deferred, &after, "(empty diff)", &[], &[], 30);
+        // Empty resolved/remaining each render with a `(none)` marker.
+        assert!(
+            out.matches("(none)").count() >= 2,
+            "expected (none) markers for both empty lists:\n{out}"
+        );
+    }
+
+    #[test]
+    fn snapshot_sweep_auditor() {
+        let plan = fixture_plan();
+        let deferred = fixture_deferred();
+        let after = pid("02");
+        let diff = "diff --git a/src/x.rs b/src/x.rs\n@@\n-old\n+new\n";
+        let resolved = vec![
+            "polish error message in PhaseId::parse".to_string(),
+            "drop unused stub in deferred::parse".to_string(),
+        ];
+        let remaining = vec![
+            "rename `flag` to `enabled` in audit config".to_string(),
+            "tighten test for empty deferred.md".to_string(),
+            "document sweep section in README".to_string(),
+        ];
+        insta::assert_snapshot!(sweep_auditor(
+            &plan, &deferred, &after, diff, &resolved, &remaining, 30
+        ));
     }
 
     #[test]

@@ -46,7 +46,6 @@ impl Script {
         self.writes.push((rel.into(), bytes.into()));
         self
     }
-
 }
 
 struct ScriptedAgent {
@@ -203,6 +202,10 @@ fn git_log_oneline(dir: &Path) -> Vec<String> {
 fn audit_disabled() -> Config {
     let mut c = Config::default();
     c.audit.enabled = false;
+    // Disable the sweep auditor too: tests in this file assert the
+    // implementer-only sweep flow. The audit-on path for sweeps is covered
+    // explicitly in `tests/sweep_auditor.rs`.
+    c.sweep.audit_enabled = false;
     c
 }
 
@@ -220,8 +223,8 @@ async fn build_runner_with_state(
     } else {
         pitboss::deferred::parse(deferred_text).expect("parse deferred")
     };
-    let state = state_override
-        .unwrap_or_else(|| runner::fresh_run_state(&plan_obj, &config, Utc::now()));
+    let state =
+        state_override.unwrap_or_else(|| runner::fresh_run_state(&plan_obj, &config, Utc::now()));
 
     let git = ShellGit::new(workspace);
     git.create_branch(&state.branch).await.unwrap();
@@ -289,8 +292,14 @@ async fn sweep_fires_between_phases_when_trigger_trips() {
         Script::default().write("src/phase_02.rs", b"// phase 2\n"),
     ]);
 
-    let mut runner =
-        build_runner(dir.path(), TWO_PHASE_PLAN, &initial, audit_disabled(), agent).await;
+    let mut runner = build_runner(
+        dir.path(),
+        TWO_PHASE_PLAN,
+        &initial,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let mut rx = runner.subscribe();
     let collector = tokio::spawn(async move {
@@ -382,9 +391,8 @@ async fn sweep_fires_between_phases_when_trigger_trips() {
     // Sweep commit message uses the canonical format.
     let log = git_log_oneline(dir.path());
     assert!(
-        log.iter().any(|l| l.contains(
-            "[pitboss] sweep after phase 01: 4 deferred items resolved"
-        )),
+        log.iter()
+            .any(|l| l.contains("[pitboss] sweep after phase 01: 4 deferred items resolved")),
         "sweep commit not found in log:\n{log:?}"
     );
 
@@ -490,8 +498,7 @@ async fn consecutive_clamp_blocks_back_to_back_sweep() {
     state::save(dir.path(), Some(&state_obj)).unwrap();
 
     // Only phase 02's implementer should dispatch — no sweep.
-    let agent =
-        ScriptedAgent::new(vec![Script::default().write("src/phase_02.rs", b"// 2\n")]);
+    let agent = ScriptedAgent::new(vec![Script::default().write("src/phase_02.rs", b"// 2\n")]);
 
     let git = ShellGit::new(dir.path());
     git.create_branch(&state_obj.branch).await.unwrap();
@@ -561,8 +568,14 @@ async fn sweep_halt_persists_pending_sweep_for_resume() {
         Script::default().write("src/phase_02.rs", b"// 2\n"),
     ]);
 
-    let mut runner =
-        build_runner(dir.path(), TWO_PHASE_PLAN, &initial, audit_disabled(), agent).await;
+    let mut runner = build_runner(
+        dir.path(),
+        TWO_PHASE_PLAN,
+        &initial,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     // Phase 01 → sweep halts. Drive run_phase manually so we can inspect
     // intermediate state.
@@ -642,8 +655,7 @@ async fn manual_deferred_cleanup_clears_pending_sweep() {
     )
     .unwrap();
 
-    let agent =
-        ScriptedAgent::new(vec![Script::default().write("src/phase_02.rs", b"// 2\n")]);
+    let agent = ScriptedAgent::new(vec![Script::default().write("src/phase_02.rs", b"// 2\n")]);
 
     let git = ShellGit::new(dir.path());
     git.create_branch(&state_obj.branch).await.unwrap();
@@ -687,10 +699,15 @@ async fn final_phase_does_not_set_pending_sweep() {
     let dir = make_workspace(ONE_PHASE_PLAN, &initial);
     init_git_repo(dir.path());
 
-    let agent =
-        ScriptedAgent::new(vec![Script::default().write("src/phase_01.rs", b"// 1\n")]);
-    let mut runner =
-        build_runner(dir.path(), ONE_PHASE_PLAN, &initial, audit_disabled(), agent).await;
+    let agent = ScriptedAgent::new(vec![Script::default().write("src/phase_01.rs", b"// 1\n")]);
+    let mut runner = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        &initial,
+        audit_disabled(),
+        agent,
+    )
+    .await;
 
     let summary = runner.run().await.unwrap();
     assert!(matches!(summary, RunSummary::Finished));
@@ -728,14 +745,22 @@ async fn empty_sweep_skips_commit_but_clears_pending() {
         Script::default().write("src/phase_02.rs", b"// 2\n"),
     ]);
 
-    let mut runner =
-        build_runner(dir.path(), TWO_PHASE_PLAN, &initial, audit_disabled(), agent).await;
+    let mut runner = build_runner(
+        dir.path(),
+        TWO_PHASE_PLAN,
+        &initial,
+        audit_disabled(),
+        agent,
+    )
+    .await;
     let summary = runner.run().await.unwrap();
     assert!(matches!(summary, RunSummary::Finished));
 
     let log = git_log_oneline(dir.path());
-    let sweep_commits: Vec<&String> =
-        log.iter().filter(|l| l.contains("sweep after phase")).collect();
+    let sweep_commits: Vec<&String> = log
+        .iter()
+        .filter(|l| l.contains("sweep after phase"))
+        .collect();
     assert!(
         sweep_commits.is_empty(),
         "empty sweep must not land a commit; log:\n{log:?}"
@@ -805,8 +830,7 @@ async fn sweep_fixer_attempts_share_state_attempts_counter() {
         Script::default().write("src/phase_02.rs", b"// 2\n"),
     ]);
 
-    let mut runner =
-        build_runner(dir.path(), TWO_PHASE_PLAN, &initial, config, agent).await;
+    let mut runner = build_runner(dir.path(), TWO_PHASE_PLAN, &initial, config, agent).await;
     let summary = runner.run().await.unwrap();
     assert!(
         matches!(summary, RunSummary::Finished),
@@ -882,8 +906,14 @@ async fn sweep_modifying_deferred_phases_halts_with_rollback() {
             .write("src/sweep.rs", b"// sweep\n"),
     ]);
 
-    let mut runner =
-        build_runner(dir.path(), TWO_PHASE_PLAN, &initial, audit_disabled(), agent).await;
+    let mut runner = build_runner(
+        dir.path(),
+        TWO_PHASE_PLAN,
+        &initial,
+        audit_disabled(),
+        agent,
+    )
+    .await;
     let summary = runner.run().await.unwrap();
     match summary {
         RunSummary::Halted { phase_id, reason } => {

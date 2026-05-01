@@ -255,8 +255,8 @@ impl App {
                 self.attempts.insert(phase_id, attempt);
                 self.activity = Activity::Fixer(fixer_attempt);
             }
-            Event::AuditorStarted { phase_id, attempt } => {
-                self.attempts.insert(phase_id, attempt);
+            Event::AuditorStarted { context, attempt } => {
+                self.attempts.insert(context.phase_id, attempt);
                 self.activity = Activity::Auditor;
             }
             Event::AuditorSkippedNoChanges { .. } => {
@@ -332,9 +332,9 @@ impl App {
             } => {
                 let line = match commit {
                     Some(c) => format!("[sweep] after phase {after}: {resolved} resolved ({c})"),
-                    None => format!(
-                        "[sweep] after phase {after}: {resolved} resolved; no code changes"
-                    ),
+                    None => {
+                        format!("[sweep] after phase {after}: {resolved} resolved; no code changes")
+                    }
                 };
                 self.push_output(line);
             }
@@ -1074,7 +1074,10 @@ mod tests {
         assert_eq!(app.current_model(), "claude-sonnet-4-6");
 
         app.handle_event(Event::AuditorStarted {
-            phase_id: pid("01"),
+            context: crate::runner::AuditContext {
+                phase_id: pid("01"),
+                kind: crate::runner::AuditContextKind::Phase,
+            },
             attempt: 3,
         });
         assert_eq!(app.current_model(), "claude-sonnet-4-6");

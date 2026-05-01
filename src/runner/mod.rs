@@ -124,6 +124,30 @@ pub fn budget_totals(config: &Config, usage: &TokenUsage) -> (u64, f64) {
     (total_tokens, total_usd)
 }
 
+/// Discriminator on [`AuditContext`]. Tells subscribers whether the audit
+/// firing belongs to a regular plan phase or a deferred sweep so the TUI and
+/// loggers can render the right header text without inspecting state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditContextKind {
+    /// Audit pass for a regular plan-phase implementer dispatch.
+    Phase,
+    /// Audit pass for a deferred-sweep dispatch.
+    Sweep,
+}
+
+/// Payload threaded through the auditor events. Carries the phase id under
+/// which the audit's attempts are accounted plus the kind discriminator. Sweep
+/// audits set `phase_id` to the most recently completed real phase (the same
+/// id [`Event::SweepStarted`] uses) so the running attempts counter still keys
+/// on a real phase id.
+#[derive(Debug, Clone)]
+pub struct AuditContext {
+    /// Phase id under which the audit's attempts are tallied.
+    pub phase_id: PhaseId,
+    /// Whether this is a phase audit or a sweep audit.
+    pub kind: AuditContextKind,
+}
+
 /// Streaming events the runner broadcasts to subscribers. Sends are
 /// best-effort: a lagging or absent subscriber never blocks the runner.
 #[derive(Debug, Clone)]
@@ -153,12 +177,16 @@ pub enum Event {
         attempt: u32,
     },
     /// The runner dispatched the auditor agent after the test suite passed.
-    /// Fires at most once per phase and only when
-    /// [`crate::config::AuditConfig::enabled`] is `true` and the implementer /
-    /// fixer dispatches produced staged code changes.
+    /// Fires at most once per phase or sweep, and only when the relevant
+    /// audit toggle ([`crate::config::AuditConfig::enabled`] for phases,
+    /// [`crate::config::SweepConfig::audit_enabled`] for sweeps) is on and
+    /// the dispatch produced staged code changes. `context.kind` discriminates
+    /// the two so the TUI can render the right header text.
     AuditorStarted {
-        /// Phase the auditor is operating on.
-        phase_id: PhaseId,
+        /// Audit-pass context: phase id + whether this is a phase or sweep
+        /// audit. Phase id is exposed via [`AuditContext::phase_id`] so plain
+        /// log consumers don't need to match on the kind.
+        context: AuditContext,
         /// Total agent-dispatch counter at this phase (mirrors
         /// [`crate::state::RunState::attempts`]).
         attempt: u32,
@@ -166,8 +194,9 @@ pub enum Event {
     /// The auditor dispatched without finding code changes worth auditing
     /// (the index was empty after staging excluded paths).
     AuditorSkippedNoChanges {
-        /// Phase whose audit was skipped.
-        phase_id: PhaseId,
+        /// Audit-pass context: phase id + whether this is a phase or sweep
+        /// audit.
+        context: AuditContext,
     },
     /// One line of agent stdout.
     AgentStdout(String),
@@ -537,8 +566,11 @@ impl<A: Agent, G: Git> Runner<A, G> {
         };
 
         self.deferred.sweep();
-        write_atomic(&deferred_path, deferred::serialize(&self.deferred).as_bytes())
-            .context("runner: writing deferred.md after sweep")?;
+        write_atomic(
+            &deferred_path,
+            deferred::serialize(&self.deferred).as_bytes(),
+        )
+        .context("runner: writing deferred.md after sweep")?;
 
         self.state.completed.push(phase_id.clone());
         // Forward step → re-arm the consecutive-sweep clamp so the next
@@ -752,18 +784,21 @@ impl<A: Agent, G: Git> Runner<A, G> {
     /// Run a deferred-sweep dispatch between two regular phases.
     ///
     /// The sweep reuses [`Runner::run_dispatch_pipeline`] with `phase: None`
-    /// and `audit: None` (phase 04 turns the auditor back on with a sweep-
-    /// specific prompt). The implementer's prompt is built via
+    /// and `audit: Some(AuditKind::Sweep { .. })` when
+    /// [`crate::config::SweepConfig::audit_enabled`] is on. The
+    /// implementer's prompt is built via
     /// [`prompts::sweep`]; if tests fail post-dispatch the fixer falls back to
     /// [`prompts::fixer_for_sweep`] inside the pipeline. `state.attempts` is
     /// keyed under `after` (the most recently completed real phase) so
     /// sweep dispatches share the same attempts budget as the phase they
     /// follow.
     async fn run_sweep_step(&mut self, after: PhaseId) -> Result<PhaseResult> {
-        // Capture pre-sweep accounting. `pre_texts` is unused in this phase;
-        // phase 05's staleness tracker reads it from a similar capture point.
+        // Capture pre-sweep accounting. `pre_unchecked` drives the resolved
+        // count for the commit message; `pre_texts` is threaded into
+        // [`AuditKind::Sweep`] so the auditor pass can diff it against the
+        // post-dispatch deferred doc to compute resolved / remaining.
         let pre_unchecked = sweep::unchecked_count(&self.deferred);
-        let _pre_texts: HashSet<String> = self
+        let pre_texts: HashSet<String> = self
             .deferred
             .items
             .iter()
@@ -819,7 +854,10 @@ impl<A: Agent, G: Git> Runner<A, G> {
             plan_path: &plan_path,
             deferred_path: &deferred_path,
             exclude_paths: &exclude,
-            audit: None,
+            audit: self.config.sweep.audit_enabled.then(|| AuditKind::Sweep {
+                after: after.clone(),
+                pre_texts: pre_texts.clone(),
+            }),
         };
 
         let has_changes = match self.run_dispatch_pipeline(spec).await? {
@@ -883,8 +921,11 @@ impl<A: Agent, G: Git> Runner<A, G> {
         // re-render them in the next implementer prompt. Mirrors the
         // post-phase sweep call in `run_phase_inner`.
         self.deferred.sweep();
-        write_atomic(&deferred_path, deferred::serialize(&self.deferred).as_bytes())
-            .context("runner: writing deferred.md after sweep step")?;
+        write_atomic(
+            &deferred_path,
+            deferred::serialize(&self.deferred).as_bytes(),
+        )
+        .context("runner: writing deferred.md after sweep step")?;
 
         self.state.pending_sweep = false;
         self.state.consecutive_sweeps = self.state.consecutive_sweeps.saturating_add(1);
@@ -1057,12 +1098,9 @@ impl<A: Agent, G: Git> Runner<A, G> {
             });
 
             let user_prompt = match phase {
-                Some(p) => prompts::fixer_with_deferred(
-                    &self.plan,
-                    p,
-                    &last_summary,
-                    &self.deferred,
-                ),
+                Some(p) => {
+                    prompts::fixer_with_deferred(&self.plan, p, &last_summary, &self.deferred)
+                }
                 None => prompts::fixer_for_sweep(&self.plan, &self.deferred, &last_summary),
             };
             let log_path = self.attempt_log_path(phase_id, "fix", fixer_attempt);
@@ -1136,9 +1174,18 @@ impl<A: Agent, G: Git> Runner<A, G> {
             .await
             .context("runner: capturing staged diff for auditor")?;
 
+        let kind = match &audit {
+            AuditKind::Phase { .. } => AuditContextKind::Phase,
+            AuditKind::Sweep { .. } => AuditContextKind::Sweep,
+        };
+        let context = AuditContext {
+            phase_id: phase_id.clone(),
+            kind,
+        };
+
         if diff.trim().is_empty() {
             let _ = self.events_tx.send(Event::AuditorSkippedNoChanges {
-                phase_id: phase_id.clone(),
+                context: context.clone(),
             });
             return Ok(AuditPassResult::Continue);
         }
@@ -1149,23 +1196,62 @@ impl<A: Agent, G: Git> Runner<A, G> {
 
         let total_attempt = self.bump_attempts(phase_id);
         let _ = self.events_tx.send(Event::AuditorStarted {
-            phase_id: phase_id.clone(),
+            context: context.clone(),
             attempt: total_attempt,
         });
 
-        let user_prompt = match audit {
-            AuditKind::Phase { phase } => prompts::auditor_with_deferred(
-                &self.plan,
-                phase,
-                &diff,
-                &self.deferred,
-                self.config.audit.small_fix_line_limit,
+        let (user_prompt, log_path) = match audit {
+            AuditKind::Phase { phase } => (
+                prompts::auditor_with_deferred(
+                    &self.plan,
+                    phase,
+                    &diff,
+                    &self.deferred,
+                    self.config.audit.small_fix_line_limit,
+                ),
+                // Phase auditor only ever runs once per phase, so the per-role
+                // attempt counter in the log filename stays at 1; the global
+                // `attempt` counter still bumps so [`RunState::attempts`]
+                // reflects the spend.
+                self.attempt_log_path(phase_id, "audit", 1),
             ),
+            AuditKind::Sweep { after, pre_texts } => {
+                // Resolved: items present in `pre_texts` (unchecked at sweep
+                // start) that are now done in the post-dispatch parse. The
+                // sweep prompt forbids rewording, so matching by exact text
+                // is sound. Remaining: still-unchecked items in the current
+                // deferred doc.
+                let resolved: Vec<String> = self
+                    .deferred
+                    .items
+                    .iter()
+                    .filter(|i| i.done && pre_texts.contains(&i.text))
+                    .map(|i| i.text.clone())
+                    .collect();
+                let remaining: Vec<String> = self
+                    .deferred
+                    .items
+                    .iter()
+                    .filter(|i| !i.done)
+                    .map(|i| i.text.clone())
+                    .collect();
+                (
+                    prompts::sweep_auditor(
+                        &self.plan,
+                        &self.deferred,
+                        &after,
+                        &diff,
+                        &resolved,
+                        &remaining,
+                        self.config.audit.small_fix_line_limit as usize,
+                    ),
+                    // Sweep audits get a sweep-prefix log path so an operator
+                    // scanning `.pitboss/play/logs/` can tell sweep audits
+                    // apart from regular phase audits at a glance.
+                    self.sweep_log_path(&after, "audit", 1),
+                )
+            }
         };
-        // Auditor only ever runs once per phase, so the per-role attempt
-        // counter in the log filename stays at 1; the global `attempt`
-        // counter still bumps so [`RunState::attempts`] reflects the spend.
-        let log_path = self.attempt_log_path(phase_id, "audit", 1);
         let request = AgentRequest {
             role: Role::Auditor,
             model: self.config.models.auditor.clone(),
@@ -1352,15 +1438,34 @@ struct DispatchSpec<'a> {
 
 /// Selects the auditor prompt variant.
 ///
-/// Phase 04 extends this with a `Sweep` variant that drives a sweep-specific
-/// auditor prompt; for now `Phase` is the only constructor and behaves
-/// identically to the pre-refactor auditor pass.
+/// `Phase` runs the regular auditor against an implementer diff for a plan
+/// phase. `Sweep` runs the sweep-specific auditor against a deferred-sweep
+/// dispatch; its contract is "for each item the implementer marked `- [x]`,
+/// does the diff actually do that work? revert anything unrelated."
 enum AuditKind<'a> {
     /// Audit a regular plan-phase implementer dispatch. Renders
     /// [`crate::prompts::auditor_with_deferred`] for the carried phase.
     Phase {
         /// The phase whose implementer diff is under review.
         phase: &'a crate::plan::Phase,
+    },
+    /// Audit a deferred-sweep dispatch. Renders [`crate::prompts::sweep_auditor`]
+    /// with the sweep's resolved / remaining item lists threaded through.
+    ///
+    /// Resolved / remaining lists are derived inside [`Runner::run_auditor_pass`]
+    /// from the post-dispatch parse of `deferred.md` against `pre_texts`, so
+    /// the call site doesn't need to defer pipeline construction until after
+    /// the implementer dispatch. It can build the spec up front and let the
+    /// auditor pass compute the lists once `self.deferred` reflects the
+    /// implementer's edits.
+    Sweep {
+        /// Most recently completed plan phase the sweep fired after. Becomes
+        /// the `{after}` substitution and selects the sweep-prefix log path.
+        after: PhaseId,
+        /// Unchecked-item text snapshot taken before the sweep dispatched.
+        /// Used to diff against the post-dispatch deferred state to compute
+        /// the resolved / remaining lists fed to the auditor prompt.
+        pre_texts: HashSet<String>,
     },
 }
 
@@ -1489,25 +1594,31 @@ fn log_event_line(event: &Event) {
                 )
             );
         }
-        Event::AuditorStarted { phase_id, attempt } => {
-            eprintln!(
-                "{fm} {}",
-                col(
-                    c,
-                    style::BLUE,
-                    &format!("phase {phase_id} auditor (total dispatch {attempt})")
-                )
-            );
+        Event::AuditorStarted { context, attempt } => {
+            let label = match context.kind {
+                AuditContextKind::Phase => format!(
+                    "phase {} auditor (total dispatch {attempt})",
+                    context.phase_id
+                ),
+                AuditContextKind::Sweep => format!(
+                    "sweep after phase {} auditor (total dispatch {attempt})",
+                    context.phase_id
+                ),
+            };
+            eprintln!("{fm} {}", col(c, style::BLUE, &label));
         }
-        Event::AuditorSkippedNoChanges { phase_id } => {
-            eprintln!(
-                "{fm} {}",
-                col(
-                    c,
-                    style::DIM,
-                    &format!("phase {phase_id} auditor skipped: no code changes to audit")
-                )
-            );
+        Event::AuditorSkippedNoChanges { context } => {
+            let label = match context.kind {
+                AuditContextKind::Phase => format!(
+                    "phase {} auditor skipped: no code changes to audit",
+                    context.phase_id
+                ),
+                AuditContextKind::Sweep => format!(
+                    "sweep after phase {} auditor skipped: no code changes to audit",
+                    context.phase_id
+                ),
+            };
+            eprintln!("{fm} {}", col(c, style::DIM, &label));
         }
         Event::AgentStdout(line) => {
             eprintln!("{} {line}", col(c, style::DIM, "[agent]"));
