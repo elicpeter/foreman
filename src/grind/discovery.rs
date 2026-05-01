@@ -406,10 +406,7 @@ mod tests {
         // least exercise the path-construction shape when it's set.
         if let Some(home) = std::env::var_os("HOME") {
             let resolved = resolve_home_prompts_dir().expect("HOME was set");
-            assert_eq!(
-                resolved,
-                PathBuf::from(home).join(".pitboss/grind/prompts")
-            );
+            assert_eq!(resolved, PathBuf::from(home).join(".pitboss/grind/prompts"));
         }
     }
 }
