@@ -52,6 +52,14 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 256;
 /// agent that floods events.
 const AGENT_EVENT_CHANNEL_CAPACITY: usize = 64;
 
+/// Cap on the number of stale `## Deferred items` entries fed into the sweep
+/// and sweep-auditor prompts. Past this, the prompt would balloon without
+/// adding value: the agent can only meaningfully address a handful of
+/// "high-stakes" items per dispatch, and a runaway map (hundreds of stuck
+/// items) almost always means the staleness signal needs operator attention,
+/// not more agent passes.
+pub const STALE_ITEMS_PROMPT_CAP: usize = 10;
+
 /// Why the runner stopped advancing the plan.
 ///
 /// Each variant carries enough context for the CLI logger (and the eventual
@@ -274,6 +282,17 @@ pub enum Event {
         /// Why the sweep halted.
         reason: HaltReason,
     },
+    /// A `## Deferred items` entry's per-sweep attempt counter just crossed
+    /// [`crate::config::SweepConfig::escalate_after`]. Transition-only — the
+    /// next sweep that increments the same item's counter further does *not*
+    /// re-emit, so subscribers (the activity log, [`pitboss status`], the TUI)
+    /// can treat each occurrence as a fresh "needs human attention" signal.
+    DeferredItemStale {
+        /// The item text from `deferred.md` (the bytes after `- [ ]`).
+        text: String,
+        /// The new attempt count, equal to or greater than `escalate_after`.
+        attempts: u32,
+    },
 }
 
 /// Outcome of [`Runner::run_phase`].
@@ -418,6 +437,33 @@ impl<A: Agent, G: Git> Runner<A, G> {
     /// call; existing subscribers are unaffected.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events_tx.subscribe()
+    }
+
+    /// Snapshot of `## Deferred items` entries whose per-sweep attempt counter
+    /// is at or above [`crate::config::SweepConfig::escalate_after`]. Sorted
+    /// by descending attempts (text ascending as a deterministic tiebreaker)
+    /// and capped at [`STALE_ITEMS_PROMPT_CAP`] entries so the sweep prompt
+    /// stays bounded.
+    ///
+    /// The runner consults this every time it builds a sweep or sweep-auditor
+    /// prompt; `pitboss status` and the TUI also call it to surface the
+    /// "needs human attention" list. Returning a fresh `Vec` keeps the caller
+    /// from leaking the underlying `RunState` map.
+    pub fn stale_items(&self) -> Vec<prompts::StaleItem> {
+        let escalate = self.config.sweep.escalate_after.max(1);
+        let mut items: Vec<prompts::StaleItem> = self
+            .state
+            .deferred_item_attempts
+            .iter()
+            .filter(|(_, &n)| n >= escalate)
+            .map(|(text, &attempts)| prompts::StaleItem {
+                text: text.clone(),
+                attempts,
+            })
+            .collect();
+        items.sort_by(|a, b| b.attempts.cmp(&a.attempts).then(a.text.cmp(&b.text)));
+        items.truncate(STALE_ITEMS_PROMPT_CAP);
+        items
     }
 
     /// Drive the runner until the plan completes or a phase halts.
@@ -822,6 +868,11 @@ impl<A: Agent, G: Git> Runner<A, G> {
         };
 
         if let Some(reason) = self.check_budget() {
+            // A halt is not a free pass on the staleness clock — items still
+            // pending count against `escalate_after` even when the dispatch
+            // never ran. `self.deferred` is unchanged here, so survivors ==
+            // pre_texts.
+            self.apply_sweep_staleness(&pre_texts);
             return Ok(PhaseResult::Halted {
                 phase_id: after,
                 reason,
@@ -835,11 +886,12 @@ impl<A: Agent, G: Git> Runner<A, G> {
             attempt,
         });
 
+        let stale = self.stale_items();
         let request = AgentRequest {
             role: Role::Implementer,
             model: self.config.models.implementer.clone(),
             system_prompt: prompts::caveman::system_prompt(&self.config.caveman),
-            user_prompt: prompts::sweep(&self.plan, &self.deferred, Some(&after), &[]),
+            user_prompt: prompts::sweep(&self.plan, &self.deferred, Some(&after), &stale),
             workdir: self.workspace.clone(),
             log_path: self.sweep_log_path(&after, "implementer", attempt),
             timeout: DEFAULT_AGENT_TIMEOUT,
@@ -862,6 +914,15 @@ impl<A: Agent, G: Git> Runner<A, G> {
 
         let has_changes = match self.run_dispatch_pipeline(spec).await? {
             PipelineOutcome::Halted(reason) => {
+                // Halt path: bookkeeping fires before the halt event so the
+                // staleness counter for surviving items reflects this attempt.
+                // For dispatch_and_validate halts, `self.deferred` is the
+                // pre-dispatch state (validation rolled back). For halts after
+                // a successful implementer dispatch (test failure, audit
+                // failure), `self.deferred` reflects the agent's edits — items
+                // the agent flipped to `- [x]` are not in post_unchecked and
+                // get pruned, items that survived get incremented.
+                self.apply_sweep_staleness(&pre_texts);
                 let _ = self.events_tx.send(Event::SweepHalted {
                     after: after.clone(),
                     reason: reason.clone(),
@@ -889,6 +950,9 @@ impl<A: Agent, G: Git> Runner<A, G> {
             if let Ok(parsed) = deferred::parse(&restored) {
                 self.deferred = parsed;
             }
+            // After restoration `self.deferred` matches pre-state, so the
+            // bookkeeping treats every pre-text item as a survivor (+1 attempt).
+            self.apply_sweep_staleness(&pre_texts);
             let reason = HaltReason::DeferredInvalid("sweep modified Deferred phases".into());
             let _ = self.events_tx.send(Event::SweepHalted {
                 after: after.clone(),
@@ -916,6 +980,12 @@ impl<A: Agent, G: Git> Runner<A, G> {
             warn!(after = %after, "sweep produced no code changes; skipping commit");
             None
         };
+
+        // Staleness bookkeeping must run before `self.deferred.sweep()` would
+        // matter, but since the helper filters on `!i.done` either order
+        // produces the same `post_unchecked_texts`. Doing it here keeps the
+        // success path symmetrical with the halt paths above.
+        self.apply_sweep_staleness(&pre_texts);
 
         // Drop the items the agent ticked off so a later regular phase doesn't
         // re-render them in the next implementer prompt. Mirrors the
@@ -1235,6 +1305,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
                     .filter(|i| !i.done)
                     .map(|i| i.text.clone())
                     .collect();
+                let stale = self.stale_items();
                 (
                     prompts::sweep_auditor(
                         &self.plan,
@@ -1243,6 +1314,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
                         &diff,
                         &resolved,
                         &remaining,
+                        &stale,
                         self.config.audit.small_fix_line_limit as usize,
                     ),
                     // Sweep audits get a sweep-prefix log path so an operator
@@ -1283,6 +1355,33 @@ impl<A: Agent, G: Git> Runner<A, G> {
         }
 
         Ok(AuditPassResult::Continue)
+    }
+
+    /// Run the per-item staleness bookkeeping after a sweep dispatch, success
+    /// or halt. Reads `post_unchecked_texts` straight from `self.deferred`
+    /// (after restoration, on halt paths) so the same code path serves every
+    /// sweep exit. Emits [`Event::DeferredItemStale`] for items whose counter
+    /// just crossed [`crate::config::SweepConfig::escalate_after`] (transition
+    /// only — items already at or above the threshold do not re-emit).
+    fn apply_sweep_staleness(&mut self, pre_texts: &HashSet<String>) {
+        let post_unchecked_texts: HashSet<String> = self
+            .deferred
+            .items
+            .iter()
+            .filter(|i| !i.done)
+            .map(|i| i.text.clone())
+            .collect();
+        let crossed = sweep::update_sweep_staleness(
+            &mut self.state.deferred_item_attempts,
+            pre_texts,
+            &post_unchecked_texts,
+            self.config.sweep.escalate_after,
+        );
+        for (text, attempts) in crossed {
+            let _ = self
+                .events_tx
+                .send(Event::DeferredItemStale { text, attempts });
+        }
     }
 
     fn fold_token_usage(&mut self, role: Role, dispatch: &AgentDispatch) {
@@ -1763,6 +1862,18 @@ fn log_event_line(event: &Event) {
                     c,
                     style::BOLD_RED,
                     &format!("sweep after phase {after} halted: {reason}")
+                )
+            );
+        }
+        Event::DeferredItemStale { text, attempts } => {
+            eprintln!(
+                "{fm} {}",
+                col(
+                    c,
+                    style::BOLD_YELLOW,
+                    &format!(
+                        "deferred item stale ({attempts} sweep attempts; needs human attention): {text}"
+                    )
                 )
             );
         }

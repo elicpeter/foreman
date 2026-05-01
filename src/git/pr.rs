@@ -235,6 +235,7 @@ mod tests {
             aborted: false,
             pending_sweep: false,
             consecutive_sweeps: 0,
+            deferred_item_attempts: HashMap::new(),
         }
     }
 

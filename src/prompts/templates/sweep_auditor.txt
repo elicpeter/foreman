@@ -35,6 +35,12 @@ Leave a one-line summary of what you did (or didn't do) on stdout before exiting
 {remaining}
 ````
 
+# Stale items (high stakes)
+
+These items have resisted previous sweeps. Be especially critical about whether the diff actually addresses them: a stale item the implementer marked `- [x]` without a corresponding diff change is a strong revert signal.
+
+{stale_items}
+
 # Sweep context
 
 - Most recently completed phase: {after}

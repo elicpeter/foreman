@@ -342,6 +342,11 @@ impl App {
                 self.activity = Activity::Halted(format_halt(&reason));
                 self.push_output(format!("[sweep:halt] after phase {after}: {reason}"));
             }
+            Event::DeferredItemStale { text, attempts } => {
+                self.push_output(format!(
+                    "[stale] {attempts} sweep attempts: {text}"
+                ));
+            }
         }
     }
 

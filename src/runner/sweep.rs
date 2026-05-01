@@ -29,6 +29,8 @@
 //! prompt names the bound; how many items it actually addresses per
 //! dispatch is the agent's call.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::config::SweepConfig;
 use crate::deferred::DeferredDoc;
 
@@ -61,6 +63,47 @@ pub fn should_run_deferred_sweep(
     }
     let pending = unchecked_count(deferred) as u32;
     pending >= sweep_cfg.trigger_min_items
+}
+
+/// Update the per-item staleness counter map after a sweep dispatch.
+///
+/// Behavior:
+///
+/// - For each text in `pre_texts ∩ post_unchecked_texts` (items that survived
+///   the sweep without being checked off), increment its entry by 1, inserting
+///   at 1 if absent.
+/// - Prune entries whose key is not in `post_unchecked_texts` (resolved items
+///   should not carry a counter, and an item the agent rewrote — old text gone,
+///   new text present — has its old key dropped here so a future sweep can
+///   start the new key from scratch).
+///
+/// Returns the list of `(text, new_attempt_count)` pairs whose counter just
+/// crossed the `escalate_after` threshold (`prev < escalate_after &&
+/// new_count >= escalate_after`). The transition-only signal lets the caller
+/// emit [`crate::runner::Event::DeferredItemStale`] exactly once per item, not
+/// on every subsequent sweep where the counter remains above the threshold.
+///
+/// `escalate_after = 0` is treated like `1` so a misconfigured zero never
+/// makes the threshold unreachable; `SweepConfig` validation rejects zero, so
+/// this only matters for direct callers.
+pub fn update_sweep_staleness(
+    attempts: &mut HashMap<String, u32>,
+    pre_texts: &HashSet<String>,
+    post_unchecked_texts: &HashSet<String>,
+    escalate_after: u32,
+) -> Vec<(String, u32)> {
+    let threshold = escalate_after.max(1);
+    let mut crossed: Vec<(String, u32)> = Vec::new();
+    for text in pre_texts.intersection(post_unchecked_texts) {
+        let prev = attempts.get(text).copied().unwrap_or(0);
+        let new_count = prev.saturating_add(1);
+        attempts.insert(text.clone(), new_count);
+        if prev < threshold && new_count >= threshold {
+            crossed.push((text.clone(), new_count));
+        }
+    }
+    attempts.retain(|k, _| post_unchecked_texts.contains(k));
+    crossed
 }
 
 #[cfg(test)]
@@ -197,6 +240,97 @@ mod tests {
             &cfg,
             3
         ));
+    }
+
+    fn texts<I: IntoIterator<Item = &'static str>>(items: I) -> HashSet<String> {
+        items.into_iter().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn staleness_increments_intersection_only() {
+        let mut map = HashMap::new();
+        let pre = texts(["a", "b", "c"]);
+        let post = texts(["a", "b"]);
+        let crossed = update_sweep_staleness(&mut map, &pre, &post, 3);
+        assert_eq!(map.get("a").copied(), Some(1));
+        assert_eq!(map.get("b").copied(), Some(1));
+        // "c" was resolved (not in post) → no entry.
+        assert!(!map.contains_key("c"));
+        // None of the new counters reached the threshold yet.
+        assert!(crossed.is_empty());
+    }
+
+    #[test]
+    fn staleness_prunes_resolved_items() {
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), 2);
+        map.insert("b".to_string(), 1);
+        // "a" was resolved this sweep → drops out. "b" survived → +1.
+        let pre = texts(["a", "b"]);
+        let post = texts(["b"]);
+        update_sweep_staleness(&mut map, &pre, &post, 3);
+        assert!(!map.contains_key("a"));
+        assert_eq!(map.get("b").copied(), Some(2));
+    }
+
+    #[test]
+    fn staleness_emits_threshold_crossing_only_on_transition() {
+        let mut map = HashMap::new();
+        map.insert("survivor".to_string(), 2);
+        let pre = texts(["survivor"]);
+        let post = texts(["survivor"]);
+        // 2 → 3 crosses escalate_after = 3.
+        let crossed = update_sweep_staleness(&mut map, &pre, &post, 3);
+        assert_eq!(
+            crossed,
+            vec![("survivor".to_string(), 3)],
+            "expected 2→3 crossing"
+        );
+        // Next sweep: 3 → 4, no fresh crossing.
+        let crossed = update_sweep_staleness(&mut map, &pre, &post, 3);
+        assert!(
+            crossed.is_empty(),
+            "items already at/above threshold must not re-emit; got {crossed:?}"
+        );
+        assert_eq!(map.get("survivor").copied(), Some(4));
+    }
+
+    #[test]
+    fn staleness_text_rewrite_prunes_old_key_then_starts_fresh() {
+        // The phase 02 sweep prompt forbids rewording, but a misbehaving agent
+        // could still do it. The bookkeeping must treat the rewritten item as
+        // brand-new work: old key drops out of the map, new key only starts
+        // accumulating once a subsequent sweep sees it in the pre-texts.
+        let mut map = HashMap::new();
+        map.insert("old text".to_string(), 2);
+        // Sweep 1: agent rewrote "old text" → "new text".
+        let pre = texts(["old text"]);
+        let post = texts(["new text"]);
+        update_sweep_staleness(&mut map, &pre, &post, 3);
+        assert!(
+            !map.contains_key("old text"),
+            "rewritten item's old key must be pruned"
+        );
+        assert!(
+            !map.contains_key("new text"),
+            "the rewrite is one sweep early — no entry yet"
+        );
+        // Sweep 2: "new text" is now in pre_texts and survives → starts at 1.
+        let pre = texts(["new text"]);
+        let post = texts(["new text"]);
+        update_sweep_staleness(&mut map, &pre, &post, 3);
+        assert_eq!(map.get("new text").copied(), Some(1));
+    }
+
+    #[test]
+    fn staleness_zero_escalate_after_clamps_to_one() {
+        // `SweepConfig::validate` rejects zero, but the helper itself must
+        // never produce a threshold that can't be crossed.
+        let mut map = HashMap::new();
+        let pre = texts(["a"]);
+        let post = texts(["a"]);
+        let crossed = update_sweep_staleness(&mut map, &pre, &post, 0);
+        assert_eq!(crossed, vec![("a".to_string(), 1)]);
     }
 
     #[test]

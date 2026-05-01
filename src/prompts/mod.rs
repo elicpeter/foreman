@@ -167,8 +167,13 @@ pub fn fixer_with_deferred(
 /// the list of `## Deferred items` text the sweep implementer flipped from
 /// `- [ ]` to `- [x]` in this dispatch; `remaining` is the unchecked-item text
 /// still pending after the sweep. `diff` is the staged `git diff --cached`.
+/// `stale_items` is the runner's per-item staleness snapshot — items at or
+/// above [`crate::config::SweepConfig::escalate_after`] — so the auditor can
+/// be more critical about a `- [x]` claim against an item that has resisted
+/// previous sweeps. Empty slice renders a `(none)` marker.
 /// The auditor's contract is "for each resolved item, does the diff actually
 /// do that work? revert anything unrelated."
+#[allow(clippy::too_many_arguments)]
 pub fn sweep_auditor(
     _plan: &Plan,
     deferred: &DeferredDoc,
@@ -176,11 +181,13 @@ pub fn sweep_auditor(
     diff: &str,
     resolved: &[String],
     remaining: &[String],
+    stale_items: &[StaleItem],
     small_fix_line_limit: usize,
 ) -> String {
     let limit = small_fix_line_limit.to_string();
     let resolved_block = render_audit_item_list(resolved);
     let remaining_block = render_audit_item_list(remaining);
+    let stale_block = render_stale_items(stale_items);
     render(
         SWEEP_AUDITOR_TEMPLATE,
         &[
@@ -188,6 +195,7 @@ pub fn sweep_auditor(
             ("diff", diff),
             ("resolved", &resolved_block),
             ("remaining", &remaining_block),
+            ("stale_items", &stale_block),
             ("deferred", &serialize_deferred_for_prompt(deferred)),
             ("small_fix_line_limit", &limit),
         ],
@@ -889,7 +897,9 @@ mod sweep {
             "tighten test for empty deferred.md".to_string(),
             "document sweep section in README".to_string(),
         ];
-        let out = sweep_auditor(&plan, &deferred, &after, diff, &resolved, &remaining, 25);
+        let out = sweep_auditor(
+            &plan, &deferred, &after, diff, &resolved, &remaining, &[], 25,
+        );
         assert!(out.contains("polish error message in PhaseId::parse"));
         assert!(out.contains("rename `flag` to `enabled` in audit config"));
         assert!(out.contains("Most recently completed phase: 02"));
@@ -899,6 +909,36 @@ mod sweep {
         assert!(!out.contains("{remaining}"));
         assert!(!out.contains("{after}"));
         assert!(!out.contains("{diff}"));
+        assert!(!out.contains("{stale_items}"));
+    }
+
+    #[test]
+    fn sweep_auditor_renders_stale_items_when_provided() {
+        let plan = fixture_plan();
+        let deferred = fixture_deferred();
+        let after = pid("02");
+        let stale = vec![StaleItem {
+            text: "polish error message in PhaseId::parse".into(),
+            attempts: 4,
+        }];
+        let out = sweep_auditor(
+            &plan,
+            &deferred,
+            &after,
+            "(empty diff)",
+            &[],
+            &[],
+            &stale,
+            25,
+        );
+        assert!(
+            out.contains("Stale items"),
+            "expected stale items section header in output:\n{out}"
+        );
+        assert!(
+            out.contains("4 sweep attempts"),
+            "expected stale-attempt count in sweep_auditor output:\n{out}"
+        );
     }
 
     #[test]
@@ -906,11 +946,20 @@ mod sweep {
         let plan = fixture_plan();
         let deferred = fixture_deferred();
         let after = pid("02");
-        let out = sweep_auditor(&plan, &deferred, &after, "(empty diff)", &[], &[], 30);
-        // Empty resolved/remaining each render with a `(none)` marker.
+        let out = sweep_auditor(
+            &plan,
+            &deferred,
+            &after,
+            "(empty diff)",
+            &[],
+            &[],
+            &[],
+            30,
+        );
+        // Empty resolved/remaining/stale each render with a `(none)` marker.
         assert!(
-            out.matches("(none)").count() >= 2,
-            "expected (none) markers for both empty lists:\n{out}"
+            out.matches("(none)").count() >= 3,
+            "expected (none) markers for resolved, remaining, and stale:\n{out}"
         );
     }
 
@@ -930,7 +979,7 @@ mod sweep {
             "document sweep section in README".to_string(),
         ];
         insta::assert_snapshot!(sweep_auditor(
-            &plan, &deferred, &after, diff, &resolved, &remaining, 30
+            &plan, &deferred, &after, diff, &resolved, &remaining, &[], 30
         ));
     }
 

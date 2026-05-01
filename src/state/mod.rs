@@ -129,6 +129,20 @@ pub struct RunState {
     /// each forward step.
     #[serde(default)]
     pub consecutive_sweeps: u32,
+    /// Per-item sweep-attempt counter, keyed on the raw `## Deferred items`
+    /// text. Each sweep dispatch (success or halt) increments the entry for
+    /// items that survived the sweep without being checked off and prunes
+    /// entries for items no longer pending. Items whose count meets or exceeds
+    /// [`crate::config::SweepConfig::escalate_after`] are surfaced as stale via
+    /// [`crate::runner::Event::DeferredItemStale`] (transition-only) and
+    /// [`crate::runner::Runner::stale_items`].
+    ///
+    /// Keying on raw text means rephrasing an item resets its counter — a
+    /// rewritten item is effectively new work. The sweep prompt forbids
+    /// rewording, so this is a documented consequence rather than a silent
+    /// gotcha.
+    #[serde(default)]
+    pub deferred_item_attempts: HashMap<String, u32>,
 }
 
 impl RunState {
@@ -150,6 +164,7 @@ impl RunState {
             aborted: false,
             pending_sweep: false,
             consecutive_sweeps: 0,
+            deferred_item_attempts: HashMap::new(),
         }
     }
 }
@@ -184,6 +199,10 @@ mod tests {
         attempts.insert(pid("02"), 1);
         attempts.insert(pid("10b"), 3);
 
+        let mut deferred_item_attempts = HashMap::new();
+        deferred_item_attempts.insert("polish error message".to_string(), 2);
+        deferred_item_attempts.insert("drop unused stub".to_string(), 1);
+
         let state = RunState {
             run_id: "20260429T143022Z".into(),
             branch: "pitboss/run-20260429T143022Z".into(),
@@ -202,6 +221,7 @@ mod tests {
             aborted: false,
             pending_sweep: false,
             consecutive_sweeps: 0,
+            deferred_item_attempts,
         };
 
         let json = serde_json::to_string(&state).unwrap();
@@ -212,9 +232,9 @@ mod tests {
     #[test]
     fn deserializes_legacy_state_without_new_fields() {
         // Older state.json files predate `original_branch`, `aborted`,
-        // `pending_sweep`, and `consecutive_sweeps`. All must default cleanly
-        // so a workspace started under an earlier pitboss build resumes under
-        // this one without manual surgery.
+        // `pending_sweep`, `consecutive_sweeps`, and `deferred_item_attempts`.
+        // All must default cleanly so a workspace started under an earlier
+        // pitboss build resumes under this one without manual surgery.
         let legacy = serde_json::json!({
             "run_id": "rid",
             "branch": "br",
@@ -229,6 +249,32 @@ mod tests {
         assert!(!state.aborted);
         assert!(!state.pending_sweep);
         assert_eq!(state.consecutive_sweeps, 0);
+        assert!(state.deferred_item_attempts.is_empty());
+    }
+
+    #[test]
+    fn deserializes_phase_04_state_without_deferred_item_attempts() {
+        // A `state.json` written under phase 04 (post-sweep features but
+        // pre-staleness) carries `pending_sweep` + `consecutive_sweeps` but
+        // not `deferred_item_attempts`. The new field must default to an
+        // empty map so the next sweep starts populating it cleanly.
+        let phase_04 = serde_json::json!({
+            "run_id": "20260430T120000Z",
+            "branch": "pitboss/play/20260430T120000Z",
+            "original_branch": "main",
+            "started_at": "2026-04-30T12:00:00Z",
+            "started_phase": "01",
+            "completed": ["01"],
+            "attempts": {"01": 2},
+            "token_usage": {"input": 100, "output": 50, "by_role": {}},
+            "aborted": false,
+            "pending_sweep": true,
+            "consecutive_sweeps": 1
+        });
+        let state: RunState = serde_json::from_value(phase_04).unwrap();
+        assert!(state.deferred_item_attempts.is_empty());
+        assert!(state.pending_sweep);
+        assert_eq!(state.consecutive_sweeps, 1);
     }
 
     #[test]
@@ -241,6 +287,7 @@ mod tests {
         assert_eq!(s.token_usage.input, 0);
         assert_eq!(s.token_usage.output, 0);
         assert!(s.token_usage.by_role.is_empty());
+        assert!(s.deferred_item_attempts.is_empty());
     }
 
     #[test]
