@@ -181,6 +181,12 @@ pub async fn run_hook(
         _ = tokio::time::sleep(timeout) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
+            // SIGKILL on `sh` does not propagate to its descendants; on
+            // shells that fork (rather than exec) the inner command, the
+            // orphaned grandchild keeps the stdout/stderr pipes open until
+            // it exits naturally. Stop draining so we return promptly.
+            stdout_task.abort();
+            stderr_task.abort();
             HookOutcome::Timeout { secs: timeout.as_secs() }
         }
         status = child.wait() => match status {
