@@ -1,5 +1,5 @@
 ---
-current_phase: "03"
+current_phase: "13"
 ---
 
 This plan adds a new `pitboss grind` execution path: a rotating prompt loop that runs sessions until folded or until a budget is hit, sharing a session log, scratchpad, and per-run directory. It is a fundamentally different path from `pitboss play` (no phased plan, no fixer/auditor cycle by default), so the implementation lives under a new `src/grind/` module rather than retrofitting the runner. Each phase ends with `cargo test` and `cargo clippy --all-targets -- -D warnings` green; clippy and rustfmt match the existing crate.

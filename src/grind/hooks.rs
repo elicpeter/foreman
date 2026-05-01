@@ -25,6 +25,17 @@ use std::time::Duration;
 
 use chrono::Utc;
 use tokio::fs::OpenOptions;
+
+/// Built-in env vars passed through to every hook child on top of the
+/// explicitly-handed pitboss vars. Keeps the surface small but covers the
+/// "real world" basics a hook needs to talk to anything outside its own
+/// process: a home directory for `~`-expansion (`HOME`, `USER`), a locale
+/// for tools that decode bytes (`LANG`), an interactive shell to defer to
+/// (`SHELL`), and the user's running ssh-agent (`SSH_AUTH_SOCK`). Anything
+/// else (credentials, custom tooling) is opt-in via
+/// `[grind] hook_env_passthrough` in `pitboss.toml`.
+pub const DEFAULT_HOOK_ENV_PASSTHROUGH: &[&str] =
+    &["HOME", "USER", "LANG", "SHELL", "SSH_AUTH_SOCK"];
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -112,6 +123,7 @@ pub async fn run_hook(
     env: &HashMap<String, String>,
     timeout: Duration,
     transcript_path: &Path,
+    passthrough_extras: &[String],
 ) -> HookOutcome {
     let label = kind.label();
     let log = open_transcript(transcript_path).await;
@@ -128,12 +140,24 @@ pub async fn run_hook(
         // Hooks should never inherit the parent's environment beyond what we
         // explicitly hand over, otherwise a stale `PITBOSS_*` from an outer
         // pitboss process could shadow this run's. `env_clear` plus an
-        // explicit `PATH` keeps the surface predictable.
+        // explicit `PATH` keeps the surface predictable. The built-in
+        // allowlist plus any user-configured extras give real-world hooks
+        // (talking to GitHub / Slack / oncall) the basics they need.
         .env_clear()
         .env(
             "PATH",
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
         );
+    for key in DEFAULT_HOOK_ENV_PASSTHROUGH {
+        if let Ok(val) = std::env::var(key) {
+            command.env(key, val);
+        }
+    }
+    for key in passthrough_extras {
+        if let Ok(val) = std::env::var(key) {
+            command.env(key, val);
+        }
+    }
     for (k, v) in env {
         command.env(k, v);
     }
@@ -294,6 +318,7 @@ mod tests {
             &env(&[("PITBOSS_SESSION_PROMPT", "alpha")]),
             Duration::from_secs(5),
             &log,
+            &[],
         )
         .await;
         assert_eq!(outcome, HookOutcome::Success);
@@ -322,6 +347,7 @@ mod tests {
             &env(&[]),
             Duration::from_secs(5),
             &log,
+            &[],
         )
         .await;
         assert_eq!(outcome, HookOutcome::Failed { exit_code: 9 });
@@ -340,6 +366,7 @@ mod tests {
             &env(&[]),
             Duration::from_secs(5),
             &log,
+            &[],
         )
         .await;
         assert!(outcome.is_success());
@@ -361,6 +388,7 @@ mod tests {
             &env(&[]),
             Duration::from_secs(1),
             &log,
+            &[],
         )
         .await;
         let elapsed = start.elapsed();
@@ -391,6 +419,7 @@ mod tests {
             ]),
             Duration::from_secs(5),
             &log,
+            &[],
         )
         .await;
         assert!(outcome.is_success());
@@ -398,6 +427,64 @@ mod tests {
         assert!(
             body.contains("prompt=fp-hunter status=ok summary=did the thing"),
             "env not reaching child: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn passthrough_extras_forward_named_parent_env_to_child() {
+        // The hook env is otherwise cleared. We prime a unique parent env
+        // var, ask `run_hook` to pass it through, and verify the child saw
+        // it. Var name is namespaced so it cannot collide with anything
+        // CI sets up.
+        let key = "PITBOSS_HOOK_PASSTHROUGH_TEST_OK";
+        std::env::set_var(key, "from-parent");
+
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("session.log");
+        let outcome = run_hook(
+            HookKind::PostSession,
+            "printf 'val=%s' \"$PITBOSS_HOOK_PASSTHROUGH_TEST_OK\"",
+            &env(&[]),
+            Duration::from_secs(5),
+            &log,
+            &[key.to_string()],
+        )
+        .await;
+        std::env::remove_var(key);
+
+        assert!(outcome.is_success(), "hook outcome: {outcome:?}");
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            body.contains("val=from-parent"),
+            "passthrough did not reach child: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn passthrough_does_not_forward_unlisted_parent_env() {
+        // Sanity check: a var the parent set but the caller did *not* list
+        // does not leak into the child. Pairs with the positive test above.
+        let key = "PITBOSS_HOOK_PASSTHROUGH_TEST_LEAK";
+        std::env::set_var(key, "should-not-leak");
+
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("session.log");
+        let outcome = run_hook(
+            HookKind::PostSession,
+            "printf 'val=[%s]' \"$PITBOSS_HOOK_PASSTHROUGH_TEST_LEAK\"",
+            &env(&[]),
+            Duration::from_secs(5),
+            &log,
+            &[],
+        )
+        .await;
+        std::env::remove_var(key);
+
+        assert!(outcome.is_success(), "hook outcome: {outcome:?}");
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            body.contains("val=[]"),
+            "unlisted parent env leaked: {body}"
         );
     }
 

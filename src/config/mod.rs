@@ -352,6 +352,14 @@ pub struct GrindConfig {
     /// Wall-clock cap applied to each plan-level shell hook (Phase 10).
     /// Defaults to `60`.
     pub hook_timeout_secs: u64,
+    /// Extra environment variables to forward into each plan-level hook on
+    /// top of the built-in allowlist (`HOME`, `USER`, `LANG`, `SHELL`,
+    /// `SSH_AUTH_SOCK`). Names listed here are looked up in the parent
+    /// process's environment at hook-fire time and, when present, copied
+    /// into the child. Useful for credential vars hooks need to talk to
+    /// GitHub / Slack / oncall systems (`GITHUB_TOKEN`, `SLACK_TOKEN`, …)
+    /// without inheriting the entire parent environment.
+    pub hook_env_passthrough: Vec<String>,
     /// What to do with per-session transcripts on the disk. Defaults to
     /// [`TranscriptRetention::KeepAll`].
     pub transcript_retention: TranscriptRetention,
@@ -371,6 +379,7 @@ impl Default for GrindConfig {
             max_parallel: 1,
             consecutive_failure_limit: 3,
             hook_timeout_secs: 60,
+            hook_env_passthrough: Vec::new(),
             transcript_retention: TranscriptRetention::default(),
             budgets: PlanBudgets::default(),
             hooks: Hooks::default(),
@@ -506,6 +515,7 @@ fn find_unknown_keys(value: &toml::Value) -> Vec<String> {
                 "max_parallel",
                 "consecutive_failure_limit",
                 "hook_timeout_secs",
+                "hook_env_passthrough",
                 "transcript_retention",
                 "budgets",
                 "hooks",

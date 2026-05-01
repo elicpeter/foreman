@@ -71,6 +71,7 @@ impl Agent for MockAgent {
             "PITBOSS_SUMMARY_FILE",
             "PITBOSS_SCRATCHPAD",
             "PITBOSS_SESSION_SEQ",
+            "PITBOSS_WORKTREE",
         ] {
             let val = req
                 .env

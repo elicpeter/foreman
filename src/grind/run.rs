@@ -638,6 +638,10 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
             "PITBOSS_SCRATCHPAD".into(),
             scratchpad_path_for_agent.display().to_string(),
         );
+        base_env.insert(
+            "PITBOSS_WORKTREE".into(),
+            workdir_for_agent.display().to_string(),
+        );
 
         Ok(SessionTaskInput {
             repo_root: self.workspace.clone(),
@@ -776,6 +780,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
     let transcript_rel = relative_to(&repo_root, &transcript_path);
 
     let hook_timeout = Duration::from_secs(config.grind.hook_timeout_secs.max(1));
+    let hook_passthrough: Vec<String> = config.grind.hook_env_passthrough.clone();
 
     // ---- pre_session hook ---------------------------------------------
     let mut skip_dispatch_reason: Option<String> = None;
@@ -788,6 +793,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
             &env,
             hook_timeout,
             &transcript_path,
+            &hook_passthrough,
         )
         .await;
         if !outcome.is_success() {
@@ -1010,8 +1016,12 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
                             run_id = %run_id,
                             seq,
                             error = %format!("{e:#}"),
-                            "grind: stash_push failed (parallel)"
+                            "grind: stash_push failed (parallel) — treating as merge conflict"
                         );
+                        if status == SessionStatus::Ok || status == SessionStatus::Dirty {
+                            status = SessionStatus::Error;
+                            summary = merge_conflict_summary(&prompt.meta.name, &e);
+                        }
                     }
                 }
             }
@@ -1048,8 +1058,12 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
                         run_id = %run_id,
                         seq,
                         error = %format!("{e:#}"),
-                        "grind: stash_push failed"
+                        "grind: stash_push failed — treating as merge conflict"
                     );
+                    if status == SessionStatus::Ok || status == SessionStatus::Dirty {
+                        status = SessionStatus::Error;
+                        summary = merge_conflict_summary(&prompt.meta.name, &e);
+                    }
                 }
             }
         }
@@ -1112,6 +1126,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
             &hook_env,
             hook_timeout,
             &transcript_path,
+            &hook_passthrough,
         )
         .await;
     }
@@ -1123,6 +1138,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
                 &hook_env,
                 hook_timeout,
                 &transcript_path,
+                &hook_passthrough,
             )
             .await;
         }
@@ -1350,6 +1366,25 @@ pub fn run_branch_name(run_id: &str) -> String {
     format!("pitboss/grind/{run_id}")
 }
 
+/// Summary text recorded when a session ends with a working-tree state that
+/// `git stash push` cannot capture (most commonly an unresolved merge / index
+/// conflict the agent left behind). The next session's pre-flight reads the
+/// status field on the prior record to know the tree it inherits had to be
+/// rolled back. Kept short so it renders cleanly in `sessions.md`.
+fn merge_conflict_summary(prompt_name: &str, err: &anyhow::Error) -> String {
+    let one_line = format!("{err:#}")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if one_line.is_empty() {
+        format!("merge conflict at session end (prompt {prompt_name})")
+    } else {
+        format!("merge conflict at session end (prompt {prompt_name}): {one_line}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1423,6 +1458,22 @@ mod tests {
         let real = dir.path().join("real.txt");
         std::fs::write(&real, "did the thing\n").unwrap();
         assert_eq!(read_summary_or_fallback(&real), "did the thing");
+    }
+
+    #[test]
+    fn merge_conflict_summary_names_prompt_and_includes_first_error_line() {
+        let err = anyhow::anyhow!("stash failed\nstderr: CONFLICT (content)");
+        let s = merge_conflict_summary("fp-hunter", &err);
+        assert!(s.contains("fp-hunter"), "summary missing prompt name: {s}");
+        assert!(s.contains("merge conflict"), "summary missing label: {s}");
+        assert!(
+            s.contains("stash failed"),
+            "summary missing first err line: {s}"
+        );
+        assert!(
+            !s.contains("CONFLICT"),
+            "summary leaked tail of multi-line err: {s}"
+        );
     }
 
     #[test]

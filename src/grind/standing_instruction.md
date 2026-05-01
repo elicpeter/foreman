@@ -25,4 +25,10 @@ need to read it from disk. The full source-of-truth lives at
 **Identity.** This session's prompt is `$PITBOSS_PROMPT_NAME`, run id
 `$PITBOSS_RUN_ID`, sequence `$PITBOSS_SESSION_SEQ`. Pitboss handles the git
 commit at the end of the session — focus on the work, not on bookkeeping.
+
+**Working directory.** The path of the tree you are editing is in
+`$PITBOSS_WORKTREE`. For sequential sessions this is the workspace root; for
+parallel-safe sessions it is a per-session git worktree under
+`.pitboss/grind/$PITBOSS_RUN_ID/worktrees/session-NNNN/`. Use this when
+inspecting or rebuilding the tree from a hook or sub-tool.
 <!-- pitboss:standing-instruction:end -->

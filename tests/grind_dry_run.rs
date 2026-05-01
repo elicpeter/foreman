@@ -124,6 +124,23 @@ fn dry_run_with_no_prompts_exits_failed_to_start() {
 }
 
 #[test]
+fn dry_run_with_resume_is_rejected() {
+    // The dry-run preview is computed from a fresh `SchedulerState`, so
+    // combining it with --resume would silently surface picks that diverge
+    // from what the resumed run actually picks next. The CLI rejects the
+    // combination up front rather than producing a misleading report.
+    let work = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    seed_three_prompts(work.path());
+
+    isolated(work.path(), home.path())
+        .args(["grind", "--dry-run", "--resume"])
+        .assert()
+        .code(4)
+        .stderr(contains("--dry-run with --resume is not supported"));
+}
+
+#[test]
 fn dry_run_help_documents_pr_and_dry_run_flags() {
     // Acceptance: `pitboss grind --help` documents every new flag added by
     // phases 08-12. This is the cheapest gate against accidentally dropping

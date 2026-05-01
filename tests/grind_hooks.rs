@@ -217,7 +217,10 @@ async fn pre_and_post_session_hooks_each_fire_once_per_session() {
     let pre_marker = dir.path().join("pre.log");
     let post_marker = dir.path().join("post.log");
 
-    let pre_cmd = format!("printf 'pre %s\\n' \"$PITBOSS_SESSION_PROMPT\" >> {}", pre_marker.display());
+    let pre_cmd = format!(
+        "printf 'pre %s wt=%s\\n' \"$PITBOSS_SESSION_PROMPT\" \"$PITBOSS_WORKTREE\" >> {}",
+        pre_marker.display()
+    );
     let post_cmd = format!(
         "printf 'post %s %s\\n' \"$PITBOSS_SESSION_STATUS\" \"$PITBOSS_SESSION_SUMMARY\" >> {}",
         post_marker.display()
@@ -256,7 +259,12 @@ async fn pre_and_post_session_hooks_each_fire_once_per_session() {
         session_count,
         "post_session marker lines: {post_body:?}"
     );
-    assert!(pre_body.lines().all(|l| l == "pre alpha"));
+    let workspace_str = workspace.display().to_string();
+    assert!(
+        pre_body.lines().all(|l| l.starts_with("pre alpha wt=")
+            && l.contains(workspace_str.as_str())),
+        "pre marker missing PITBOSS_WORKTREE = workspace ({workspace_str}): {pre_body:?}"
+    );
     assert!(post_body.lines().all(|l| l.starts_with("post ok ran session")));
 
     // Captured banners and prefixed output land in the per-session transcript.

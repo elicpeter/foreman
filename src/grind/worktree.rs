@@ -22,6 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use tracing::warn;
 
 use crate::git::{Git, ShellGit};
 
@@ -201,6 +202,95 @@ impl SessionWorktree {
     }
 }
 
+/// Sweep stale parallel-session worktrees left behind by an interrupted
+/// run. Used by `pitboss grind --resume` to clean up before any new
+/// session is dispatched.
+///
+/// Walks the immediate children of `<run_paths.worktrees>/` (the `failed/`
+/// subdirectory is intentionally skipped — it holds quarantined forensics
+/// copies that must survive a resume), parses the `session-NNNN` suffix
+/// off each entry, and drops every entry whose seq is strictly greater
+/// than `last_session_seq`. For each match we ask git to remove the
+/// worktree (force-removal — the entry is by definition not in flight, so
+/// any local edits would have been lost when the host process died), then
+/// delete the matching ephemeral branch.
+///
+/// Errors during a single entry are logged and skipped so a partial sweep
+/// still cleans up everything it can. Returns the number of entries that
+/// were removed.
+pub async fn sweep_stale_session_worktrees(
+    repo_git: &dyn Git,
+    run_paths: &RunPaths,
+    run_id: &str,
+    last_session_seq: u32,
+) -> usize {
+    let Ok(read_dir) = std::fs::read_dir(&run_paths.worktrees) else {
+        // No worktrees/ dir → nothing to sweep. Sequential-only runs hit
+        // this path; not an error.
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Skip the quarantine root entirely — those entries are forensic.
+        if name == "failed" {
+            continue;
+        }
+        let Some(seq_str) = name.strip_prefix("session-") else {
+            continue;
+        };
+        let Ok(seq) = seq_str.parse::<u32>() else {
+            continue;
+        };
+        if seq <= last_session_seq {
+            continue;
+        }
+        let branch = session_branch_name(run_id, seq);
+        if let Err(e) = repo_git.remove_worktree(&path).await {
+            warn!(
+                run_id = %run_id,
+                seq,
+                path = %path.display(),
+                error = %format!("{e:#}"),
+                "grind: resume sweep: remove_worktree failed"
+            );
+        }
+        // Even if remove_worktree failed, drop the directory if it is
+        // still on disk so a future resume doesn't trip over it. The
+        // path may already be gone if `git worktree remove` succeeded
+        // but the bookkeeping warned anyway.
+        if path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                warn!(
+                    run_id = %run_id,
+                    seq,
+                    path = %path.display(),
+                    error = %format!("{e:#}"),
+                    "grind: resume sweep: remove_dir_all failed"
+                );
+                continue;
+            }
+        }
+        if let Err(e) = repo_git.delete_branch(&branch).await {
+            warn!(
+                run_id = %run_id,
+                seq,
+                branch = %branch,
+                error = %format!("{e:#}"),
+                "grind: resume sweep: delete_branch failed"
+            );
+        }
+        removed += 1;
+    }
+    removed
+}
+
 /// Compose the per-session branch name. Stable so resume / forensics tooling
 /// can pattern-match on it.
 ///
@@ -274,6 +364,108 @@ mod tests {
             session_branch_name("20260430T120000Z-aaaa", 7),
             "pitboss/grind/20260430T120000Z-aaaa-session-0007"
         );
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_only_seqs_above_last_session_seq() {
+        // Build a fake run dir with five session-NNNN worktrees plus the
+        // forensic `failed/` and an unrelated entry. Sweep with
+        // last_session_seq = 2: entries 1 and 2 stay, 3/4/5 leave, and
+        // forensic + unrelated are untouched.
+        use crate::git::{MockGit, MockOp};
+        let dir = tempfile::tempdir().unwrap();
+        let run_root = dir.path().join("run-root");
+        std::fs::create_dir_all(&run_root).unwrap();
+        let paths = RunPaths {
+            root: run_root.clone(),
+            sessions_jsonl: run_root.join("sessions.jsonl"),
+            sessions_md: run_root.join("sessions.md"),
+            scratchpad: run_root.join("scratchpad.md"),
+            transcripts: run_root.join("transcripts"),
+            worktrees: run_root.join("worktrees"),
+            state: run_root.join("state.json"),
+        };
+        std::fs::create_dir_all(&paths.worktrees).unwrap();
+        for seq in 1..=5u32 {
+            let p = paths.worktrees.join(format!("session-{seq:04}"));
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("marker"), format!("{seq}")).unwrap();
+        }
+        // Forensic copies live under failed/ and must survive the sweep.
+        let failed = paths.worktrees.join("failed").join("session-0009");
+        std::fs::create_dir_all(&failed).unwrap();
+        std::fs::write(failed.join("marker"), b"forensic").unwrap();
+        // Unrelated entries that don't match the session-NNNN pattern.
+        std::fs::create_dir_all(paths.worktrees.join("scratch")).unwrap();
+        std::fs::write(paths.worktrees.join("loose-file"), b"x").unwrap();
+
+        let git = MockGit::new();
+        let removed = sweep_stale_session_worktrees(&git, &paths, "rid", 2).await;
+        assert_eq!(removed, 3, "expected to remove session-0003..0005");
+
+        // 1, 2 still present.
+        for seq in 1..=2u32 {
+            assert!(
+                paths.worktrees.join(format!("session-{seq:04}")).exists(),
+                "session-{seq:04} should still exist"
+            );
+        }
+        // 3, 4, 5 gone.
+        for seq in 3..=5u32 {
+            assert!(
+                !paths.worktrees.join(format!("session-{seq:04}")).exists(),
+                "session-{seq:04} should have been swept"
+            );
+        }
+        // Forensics + non-pattern entries untouched.
+        assert!(failed.exists(), "failed/ entry should survive sweep");
+        assert!(paths.worktrees.join("scratch").exists());
+        assert!(paths.worktrees.join("loose-file").exists());
+
+        // Each removal hit both `remove_worktree` and `delete_branch`.
+        let ops = git.ops();
+        let removes: Vec<&PathBuf> = ops
+            .iter()
+            .filter_map(|op| match op {
+                MockOp::RemoveWorktree(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        let deletes: Vec<&String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                MockOp::DeleteBranch(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removes.len(), 3);
+        assert_eq!(deletes.len(), 3);
+        assert!(deletes.iter().any(|b| *b == "pitboss/grind/rid-session-0003"));
+        assert!(deletes.iter().any(|b| *b == "pitboss/grind/rid-session-0004"));
+        assert!(deletes.iter().any(|b| *b == "pitboss/grind/rid-session-0005"));
+    }
+
+    #[tokio::test]
+    async fn sweep_no_op_when_worktrees_dir_missing() {
+        use crate::git::MockGit;
+        let dir = tempfile::tempdir().unwrap();
+        let run_root = dir.path().join("run-root");
+        std::fs::create_dir_all(&run_root).unwrap();
+        let paths = RunPaths {
+            root: run_root.clone(),
+            sessions_jsonl: run_root.join("sessions.jsonl"),
+            sessions_md: run_root.join("sessions.md"),
+            scratchpad: run_root.join("scratchpad.md"),
+            transcripts: run_root.join("transcripts"),
+            worktrees: run_root.join("worktrees"),
+            state: run_root.join("state.json"),
+        };
+        // No worktrees/ dir created. Sequential-only runs hit this path
+        // and the sweep must be a silent no-op.
+        let git = MockGit::new();
+        let removed = sweep_stale_session_worktrees(&git, &paths, "rid", 0).await;
+        assert_eq!(removed, 0);
+        assert!(git.ops().is_empty());
     }
 
     #[test]

@@ -27,7 +27,8 @@ use crate::config::{self, Config};
 use crate::git::{self, Git, ShellGit};
 use crate::grind::{
     default_plan_from_dir, discover_prompts, generate_run_id, load_plan, render_dry_run_report,
-    resolve_budgets, resolve_target, run_branch_name, validate_resume, DiscoveryOptions,
+    resolve_budgets, resolve_target, run_branch_name,
+    sweep_stale_session_worktrees as pitboss_grind_sweep, validate_resume, DiscoveryOptions,
     DryRunInputs, ExitCode, GrindPlan, GrindRunner, GrindShutdown, GrindStopReason, PlanBudgets,
     PromptDoc, ResumeError, RunDir, RunListing, SessionRecord, SessionStatus,
 };
@@ -35,6 +36,7 @@ use crate::style::{self, col};
 
 /// `pitboss grind [options]` argument surface.
 #[derive(Debug, Args)]
+#[command(after_help = GRIND_AFTER_HELP)]
 pub struct GrindArgs {
     /// Plan name to load. Resolves to `.pitboss/plans/<plan>.toml`. Without
     /// this flag the runner falls back to `[grind] default_plan` from
@@ -88,6 +90,16 @@ pub struct GrindArgs {
     pub resume: Option<String>,
 }
 
+/// Help-epilog table. Mirrors `crate::grind::ExitCode` so users can map a
+/// process exit code back to a grind outcome without spelunking the source.
+const GRIND_AFTER_HELP: &str = "Exit codes:
+  0  Success — every dispatched session reported ok.
+  1  Mixed failures — at least one session ended in error / timeout / dirty.
+  2  Aborted — second Ctrl-C (or external SIGINT) cancelled the run.
+  3  Budget exhausted — --max-iterations / --until / --max-cost / --max-tokens hit.
+  4  Failed to start — config / discovery / git / resume pre-flight refused the run.
+  5  Consecutive failures — `[grind] consecutive_failure_limit` tripped.";
+
 fn parse_rfc3339(s: &str) -> std::result::Result<DateTime<Utc>, String> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -99,6 +111,18 @@ fn parse_rfc3339(s: &str) -> std::result::Result<DateTime<Utc>, String> {
 /// before any session is dispatched surface as
 /// [`ExitCode::FailedToStart`] with a stderr message.
 pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
+    // The dry-run report is computed from a fresh `SchedulerState`. Combining
+    // it with `--resume` would silently surface picks that diverge from what
+    // the resumed run actually picks next. Reject the combination until
+    // dry-run can load the persisted scheduler / budget snapshot.
+    if args.dry_run && args.resume.is_some() {
+        print_failed_to_start(
+            "--dry-run with --resume is not supported (the rotation preview \
+             would not reflect the persisted scheduler state)",
+        );
+        return Ok(ExitCode::FailedToStart);
+    }
+
     let config = match config::load(&workspace) {
         Ok(c) => c,
         Err(e) => {
@@ -331,6 +355,31 @@ where
             return Ok(ExitCode::FailedToStart);
         }
     };
+
+    // Sweep parallel-session worktrees the original run left behind. If
+    // pitboss died mid-flight the directories at
+    // `worktrees/session-NNNN/` and the matching ephemeral branches stay
+    // on disk; an untouched resume that picks the same seq numbers (it
+    // shouldn't — `next_seq = last_session_seq + 1`) would otherwise
+    // collide on the path / branch. Even when there is no collision the
+    // stale tree just balloons the run dir forever. Sweep happens after
+    // the dirty-tree pre-flight so we never wipe a tree the user is
+    // actively triaging from.
+    let sweep_git = ShellGit::new(workspace.clone());
+    let removed = pitboss_grind_sweep(
+        &sweep_git,
+        run_dir.paths(),
+        &listing.run_id,
+        listing.state.last_session_seq,
+    )
+    .await;
+    if removed > 0 {
+        info!(
+            run_id = %listing.run_id,
+            removed,
+            "grind: resume swept stale worktrees"
+        );
+    }
 
     let cli_budgets = PlanBudgets {
         max_iterations: args.max_iterations,
