@@ -73,7 +73,7 @@ pub struct SweepArgs {
 
 /// Top-level entry point for the `sweep` subcommand. Returns
 /// [`ExitCode::Success`] on a successful sweep (committed or no-changes)
-/// and [`ExitCode::Failure`] on a halt.
+/// and [`ExitCode::MixedFailures`] on a halt.
 pub async fn run(workspace: PathBuf, args: SweepArgs) -> Result<ExitCode> {
     let config = config::load(&workspace)
         .with_context(|| format!("sweep: loading config in {:?}", workspace))?;
