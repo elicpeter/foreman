@@ -965,13 +965,51 @@ impl<A: Agent, G: Git> Runner<A, G> {
             audit,
         } = spec;
 
+        let test_runner = match self
+            .run_dispatch_through_fixer(request, phase, plan_path, deferred_path, &phase_id)
+            .await?
+        {
+            DispatchOutcome::Halted(reason) => return Ok(PipelineOutcome::Halted(reason)),
+            DispatchOutcome::Continue { test_runner } => test_runner,
+        };
+
+        self.run_audit_and_stage(
+            audit,
+            test_runner.as_ref(),
+            plan_path,
+            deferred_path,
+            exclude_paths,
+            &phase_id,
+        )
+        .await
+    }
+
+    /// First half of the pipeline: dispatch the agent, validate planning
+    /// artifacts, run the project tests, and drive the fixer loop on failure.
+    /// Returns the resolved test runner (or `None` when no runner was
+    /// detected) so the caller can hand it to [`Runner::run_audit_and_stage`]
+    /// without re-detecting.
+    ///
+    /// Split out from [`Runner::run_dispatch_pipeline`] so the sweep call
+    /// site can interpose between dispatch and audit: by then `self.deferred`
+    /// reflects the implementer's edits, so the caller can compute the
+    /// `resolved` / `remaining` lists and build [`AuditKind::Sweep`] with
+    /// the spec-shape fields filled in directly.
+    async fn run_dispatch_through_fixer(
+        &mut self,
+        request: AgentRequest,
+        phase: Option<&crate::plan::Phase>,
+        plan_path: &Path,
+        deferred_path: &Path,
+        phase_id: &PhaseId,
+    ) -> Result<DispatchOutcome> {
         let role = request.role;
         match self
             .dispatch_and_validate(request, role, plan_path, deferred_path)
             .await?
         {
             ValidationResult::Continue => {}
-            ValidationResult::Halt(reason) => return Ok(PipelineOutcome::Halted(reason)),
+            ValidationResult::Halt(reason) => return Ok(DispatchOutcome::Halted(reason)),
         }
 
         let test_runner = if self.skip_tests {
@@ -985,12 +1023,12 @@ impl<A: Agent, G: Git> Runner<A, G> {
             // operators can pair them up at a glance. `bump_attempts` was
             // called by the caller before building `request`, so reading
             // state.attempts here yields exactly that attempt.
-            let attempt = self.state.attempts.get(&phase_id).copied().unwrap_or(0);
-            let outcome = self.run_tests(runner, &phase_id, "tests", attempt).await?;
+            let attempt = self.state.attempts.get(phase_id).copied().unwrap_or(0);
+            let outcome = self.run_tests(runner, phase_id, "tests", attempt).await?;
             if !outcome.passed {
                 match self
                     .run_fixer_loop(
-                        &phase_id,
+                        phase_id,
                         phase,
                         runner,
                         plan_path,
@@ -1001,7 +1039,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 {
                     FixerLoopResult::Passed => {}
                     FixerLoopResult::Halted(reason) => {
-                        return Ok(PipelineOutcome::Halted(reason));
+                        return Ok(DispatchOutcome::Halted(reason));
                     }
                 }
             }
@@ -1012,15 +1050,36 @@ impl<A: Agent, G: Git> Runner<A, G> {
             let _ = self.events_tx.send(Event::TestsSkipped);
         }
 
+        Ok(DispatchOutcome::Continue { test_runner })
+    }
+
+    /// Second half of the pipeline: run the optional auditor pass, then
+    /// re-stage code-only changes so the caller can decide whether to commit.
+    ///
+    /// Split out from [`Runner::run_dispatch_pipeline`] for the same reason
+    /// as [`Runner::run_dispatch_through_fixer`] — see that method's doc for
+    /// the why. Phase callers reach this through the
+    /// [`Runner::run_dispatch_pipeline`] wrapper; sweep callers invoke it
+    /// directly so they can build [`AuditKind::Sweep`] with the
+    /// post-dispatch `resolved` / `remaining` lists.
+    async fn run_audit_and_stage(
+        &mut self,
+        audit: Option<AuditKind<'_>>,
+        test_runner: Option<&project_tests::TestRunner>,
+        plan_path: &Path,
+        deferred_path: &Path,
+        exclude_paths: &[&Path],
+        phase_id: &PhaseId,
+    ) -> Result<PipelineOutcome> {
         if let Some(audit) = audit {
             match self
                 .run_auditor_pass(
                     audit,
-                    test_runner.as_ref(),
+                    test_runner,
                     plan_path,
                     deferred_path,
                     exclude_paths,
-                    &phase_id,
+                    phase_id,
                 )
                 .await?
             {
@@ -1172,9 +1231,10 @@ impl<A: Agent, G: Git> Runner<A, G> {
         persist_state: bool,
     ) -> Result<PhaseResult> {
         // Capture pre-sweep accounting. `pre_unchecked` drives the resolved
-        // count for the commit message; `pre_texts` is threaded into
-        // [`AuditKind::Sweep`] so the auditor pass can diff it against the
-        // post-dispatch deferred doc to compute resolved / remaining.
+        // count for the commit message; `pre_texts` is the unchecked-item
+        // text snapshot the post-dispatch step diffs against to derive
+        // [`AuditKind::Sweep`]'s `resolved` / `remaining` lists and the
+        // staleness counter increments for surviving items.
         let pre_unchecked = sweep::unchecked_count(&self.deferred);
         let pre_texts: HashSet<String> = self
             .deferred
@@ -1237,22 +1297,14 @@ impl<A: Agent, G: Git> Runner<A, G> {
         };
 
         let exclude: [&Path; 1] = [Path::new(".pitboss")];
-        let spec = DispatchSpec {
-            request,
-            phase_id: accounting.clone(),
-            phase: None,
-            plan_path: &plan_path,
-            deferred_path: &deferred_path,
-            exclude_paths: &exclude,
-            audit: self.config.sweep.audit_enabled.then(|| AuditKind::Sweep {
-                after: accounting.clone(),
-                pre_texts: pre_texts.clone(),
-            }),
-        };
 
-        let has_changes = match self.run_dispatch_pipeline(spec).await? {
-            PipelineOutcome::Halted(reason) => {
-                // Halt path: bookkeeping fires before the halt event so the
+        // Split-pipeline dance: run the implementer dispatch + tests + fixer
+        // first so `self.deferred` reflects the agent's edits, then build
+        // [`AuditKind::Sweep`] with the spec-shape `resolved` / `remaining`
+        // lists computed against `pre_texts`, then run the audit + stage half.
+        let halt_with_staleness =
+            |this: &mut Self, reason: HaltReason, pre_texts: &HashSet<String>| {
+                // Halt-path bookkeeping fires before the halt event so the
                 // staleness counter for surviving items reflects this attempt.
                 // For dispatch_and_validate halts, `self.deferred` is the
                 // pre-dispatch state (validation rolled back). For halts after
@@ -1260,15 +1312,64 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 // failure), `self.deferred` reflects the agent's edits — items
                 // the agent flipped to `- [x]` are not in post_unchecked and
                 // get pruned, items that survived get incremented.
-                self.apply_sweep_staleness(&pre_texts);
-                let _ = self.events_tx.send(Event::SweepHalted {
+                this.apply_sweep_staleness(pre_texts);
+                let _ = this.events_tx.send(Event::SweepHalted {
                     after: accounting.clone(),
                     reason: reason.clone(),
                 });
-                return Ok(PhaseResult::Halted {
-                    phase_id: accounting,
+                PhaseResult::Halted {
+                    phase_id: accounting.clone(),
                     reason,
-                });
+                }
+            };
+
+        let test_runner = match self
+            .run_dispatch_through_fixer(request, None, &plan_path, &deferred_path, &accounting)
+            .await?
+        {
+            DispatchOutcome::Halted(reason) => {
+                return Ok(halt_with_staleness(self, reason, &pre_texts));
+            }
+            DispatchOutcome::Continue { test_runner } => test_runner,
+        };
+
+        let audit = self.config.sweep.audit_enabled.then(|| {
+            // The sweep prompt forbids rewording, so matching the pre-sweep
+            // unchecked snapshot by exact text is sound.
+            let resolved: Vec<String> = self
+                .deferred
+                .items
+                .iter()
+                .filter(|i| i.done && pre_texts.contains(&i.text))
+                .map(|i| i.text.clone())
+                .collect();
+            let remaining: Vec<String> = self
+                .deferred
+                .items
+                .iter()
+                .filter(|i| !i.done)
+                .map(|i| i.text.clone())
+                .collect();
+            AuditKind::Sweep {
+                after: accounting.clone(),
+                resolved,
+                remaining,
+            }
+        });
+
+        let has_changes = match self
+            .run_audit_and_stage(
+                audit,
+                test_runner.as_ref(),
+                &plan_path,
+                &deferred_path,
+                &exclude,
+                &accounting,
+            )
+            .await?
+        {
+            PipelineOutcome::Halted(reason) => {
+                return Ok(halt_with_staleness(self, reason, &pre_texts));
             }
             PipelineOutcome::Staged { has_changes } => has_changes,
         };
@@ -1631,26 +1732,11 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 // reflects the spend.
                 self.attempt_log_path(phase_id, "audit", 1),
             ),
-            AuditKind::Sweep { after, pre_texts } => {
-                // Resolved: items present in `pre_texts` (unchecked at sweep
-                // start) that are now done in the post-dispatch parse. The
-                // sweep prompt forbids rewording, so matching by exact text
-                // is sound. Remaining: still-unchecked items in the current
-                // deferred doc.
-                let resolved: Vec<String> = self
-                    .deferred
-                    .items
-                    .iter()
-                    .filter(|i| i.done && pre_texts.contains(&i.text))
-                    .map(|i| i.text.clone())
-                    .collect();
-                let remaining: Vec<String> = self
-                    .deferred
-                    .items
-                    .iter()
-                    .filter(|i| !i.done)
-                    .map(|i| i.text.clone())
-                    .collect();
+            AuditKind::Sweep {
+                after,
+                resolved,
+                remaining,
+            } => {
                 let stale = self.stale_items();
                 (
                     prompts::sweep_auditor(prompts::SweepAuditorPrompt {
@@ -1926,20 +2012,35 @@ enum AuditKind<'a> {
     /// Audit a deferred-sweep dispatch. Renders [`crate::prompts::sweep_auditor`]
     /// with the sweep's resolved / remaining item lists threaded through.
     ///
-    /// Resolved / remaining lists are derived inside [`Runner::run_auditor_pass`]
-    /// from the post-dispatch parse of `deferred.md` against `pre_texts`, so
-    /// the call site doesn't need to defer pipeline construction until after
-    /// the implementer dispatch. It can build the spec up front and let the
-    /// auditor pass compute the lists once `self.deferred` reflects the
-    /// implementer's edits.
+    /// Both lists are computed by the sweep call site after the implementer
+    /// dispatch has updated `self.deferred`; the auditor pass just reads them.
+    /// See [`Runner::run_dispatch_through_fixer`] /
+    /// [`Runner::run_audit_and_stage`] for the split-pipeline shape that
+    /// makes this possible.
     Sweep {
         /// Most recently completed plan phase the sweep fired after. Becomes
         /// the `{after}` substitution and selects the sweep-prefix log path.
         after: PhaseId,
-        /// Unchecked-item text snapshot taken before the sweep dispatched.
-        /// Used to diff against the post-dispatch deferred state to compute
-        /// the resolved / remaining lists fed to the auditor prompt.
-        pre_texts: HashSet<String>,
+        /// Items the implementer flipped from `- [ ]` to `- [x]` during the
+        /// sweep dispatch (intersected with the pre-sweep unchecked snapshot
+        /// so a reworded item doesn't get miscounted).
+        resolved: Vec<String>,
+        /// Items still unchecked in `deferred.md` after the sweep dispatch.
+        remaining: Vec<String>,
+    },
+}
+
+/// Outcome of [`Runner::run_dispatch_through_fixer`]. The first half of the
+/// pipeline either halts (validation, fixer-budget, or budget exhaustion) or
+/// continues and hands back the test runner it resolved so the second half
+/// ([`Runner::run_audit_and_stage`]) can re-use it for the post-audit re-run.
+enum DispatchOutcome {
+    Halted(HaltReason),
+    Continue {
+        /// Test runner detected for this dispatch (or `None` when tests were
+        /// skipped or no runner was configured). Re-used by the auditor pass
+        /// so a single dispatch only probes for tests once.
+        test_runner: Option<project_tests::TestRunner>,
     },
 }
 
