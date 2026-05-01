@@ -29,11 +29,25 @@ const RUN_ID: &str = "20260430T180000Z-hooks";
 
 struct MockAgent {
     invocations: Arc<AtomicU32>,
+    /// When `Some`, the agent reports this stop reason instead of `Completed`.
+    /// `StopReason::Cancelled` lets a test exercise the `SessionStatus::Aborted`
+    /// path without wiring a real signal handler.
+    stop_override: Option<StopReason>,
 }
 
 impl MockAgent {
     fn new(invocations: Arc<AtomicU32>) -> Self {
-        Self { invocations }
+        Self {
+            invocations,
+            stop_override: None,
+        }
+    }
+
+    fn with_stop(invocations: Arc<AtomicU32>, stop: StopReason) -> Self {
+        Self {
+            invocations,
+            stop_override: Some(stop),
+        }
     }
 }
 
@@ -78,9 +92,18 @@ impl Agent for MockAgent {
         }
         fs::write(&summary_file, format!("ran session {seq}")).ok();
 
+        let stop = self
+            .stop_override
+            .clone()
+            .unwrap_or(StopReason::Completed);
+        let exit_code = if matches!(stop, StopReason::Completed) {
+            0
+        } else {
+            -1
+        };
         Ok(AgentOutcome {
-            exit_code: 0,
-            stop_reason: StopReason::Completed,
+            exit_code,
+            stop_reason: stop,
             tokens: pitboss::state::TokenUsage::default(),
             log_path: req.log_path,
         })
@@ -146,6 +169,15 @@ struct Built {
 }
 
 async fn build(workspace: &Path, hooks: Hooks, hook_timeout_secs: u64) -> Built {
+    build_with_agent(workspace, hooks, hook_timeout_secs, None).await
+}
+
+async fn build_with_agent(
+    workspace: &Path,
+    hooks: Hooks,
+    hook_timeout_secs: u64,
+    stop_override: Option<StopReason>,
+) -> Built {
     init_git_repo(workspace);
     let branch = pitboss::grind::run_branch_name(RUN_ID);
     let git = ShellGit::new(workspace);
@@ -165,6 +197,10 @@ async fn build(workspace: &Path, hooks: Hooks, hook_timeout_secs: u64) -> Built 
 
     let runner_git = ShellGit::new(workspace);
     let invocations = Arc::new(AtomicU32::new(0));
+    let agent = match stop_override {
+        Some(stop) => MockAgent::with_stop(invocations.clone(), stop),
+        None => MockAgent::new(invocations.clone()),
+    };
     let runner = GrindRunner::new(
         workspace.to_path_buf(),
         config,
@@ -173,7 +209,7 @@ async fn build(workspace: &Path, hooks: Hooks, hook_timeout_secs: u64) -> Built 
         plan,
         lookup(&prompts),
         run_dir,
-        MockAgent::new(invocations.clone()),
+        agent,
         runner_git,
         PlanBudgets::default(),
         3,
@@ -455,4 +491,70 @@ async fn hook_timeout_is_killed_and_logged_in_transcript() {
 
     let records = log.records().unwrap();
     assert_eq!(records[0].status, SessionStatus::Error);
+}
+
+/// An Aborted session must skip post_session and on_failure entirely. Without
+/// this skip, the second Ctrl-C the user typed would still block on hook
+/// completion (or hook_timeout_secs apiece), defeating the abort signal.
+#[tokio::test]
+async fn aborted_session_skips_post_and_on_failure_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path();
+    let post_marker = dir.path().join("post.log");
+    let on_failure_marker = dir.path().join("on_failure.log");
+
+    let hooks = Hooks {
+        pre_session: None,
+        post_session: Some(format!("echo post >> {}", post_marker.display())),
+        on_failure: Some(format!("echo failed >> {}", on_failure_marker.display())),
+    };
+
+    // Cancelled stop reason maps to SessionStatus::Aborted in the runner.
+    let Built {
+        mut runner,
+        log,
+        invocations,
+        ..
+    } = build_with_agent(workspace, hooks, 60, Some(StopReason::Cancelled)).await;
+
+    // Aborted sessions don't bump the consecutive-failure counter, so the
+    // single-prompt plan would loop forever without a drain. Drain as soon
+    // as the first session record lands.
+    let shutdown = GrindShutdown::new();
+    let log_for_watch = log.clone();
+    let watch_shutdown = shutdown.clone();
+    let watcher = tokio::spawn(async move {
+        loop {
+            if let Ok(records) = log_for_watch.records() {
+                if !records.is_empty() {
+                    watch_shutdown.drain();
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    let _ = runner.run(shutdown).await.unwrap();
+    let _ = watcher.await;
+
+    // The agent did fire (the abort happened via stop_reason after dispatch).
+    assert!(invocations.load(Ordering::SeqCst) >= 1);
+
+    let records = log.records().unwrap();
+    assert!(!records.is_empty(), "expected at least one session record");
+    assert_eq!(records[0].status, SessionStatus::Aborted);
+
+    // Neither hook marker was written — both were skipped because the session
+    // was Aborted. The user pressed Ctrl-C twice; pitboss owes them a fast
+    // exit, not a hook gauntlet.
+    let post_body = fs::read_to_string(&post_marker).unwrap_or_default();
+    assert!(
+        post_body.is_empty(),
+        "post_session should be skipped on Aborted: {post_body:?}"
+    );
+    let on_failure_body = fs::read_to_string(&on_failure_marker).unwrap_or_default();
+    assert!(
+        on_failure_body.is_empty(),
+        "on_failure should be skipped on Aborted: {on_failure_body:?}"
+    );
 }

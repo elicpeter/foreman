@@ -66,6 +66,10 @@ pub enum ExitCode {
     /// The consecutive-failure escape valve fired (see
     /// [`crate::config::GrindConfig::consecutive_failure_limit`]). `5`.
     ConsecutiveFailures = 5,
+    /// `--require-pr` was set, the run otherwise succeeded, but the post-run
+    /// `gh pr create` call failed. Lets a CI script tell "the work shipped but
+    /// the PR open failed" apart from a fully clean run. `6`.
+    PrCreationFailed = 6,
 }
 
 impl ExitCode {
@@ -90,6 +94,7 @@ impl std::fmt::Display for ExitCode {
             ExitCode::BudgetExhausted => f.write_str("budget-exhausted"),
             ExitCode::FailedToStart => f.write_str("failed-to-start"),
             ExitCode::ConsecutiveFailures => f.write_str("consecutive-failures"),
+            ExitCode::PrCreationFailed => f.write_str("pr-creation-failed"),
         }
     }
 }
@@ -602,6 +607,7 @@ mod tests {
         assert_eq!(ExitCode::BudgetExhausted.as_u8(), 3);
         assert_eq!(ExitCode::FailedToStart.as_u8(), 4);
         assert_eq!(ExitCode::ConsecutiveFailures.as_u8(), 5);
+        assert_eq!(ExitCode::PrCreationFailed.as_u8(), 6);
     }
 
     #[test]

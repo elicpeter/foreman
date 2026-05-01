@@ -53,8 +53,8 @@ pub use run_dir::{
 };
 pub use scheduler::{Scheduler, SchedulerState};
 pub use state::{
-    build_state, diff_prompt_names, list_runs, most_recent_resumable, resolve_target,
-    validate_resume, ResumeError, RunListing, RunState, RunStatus,
+    build_state, diff_prompt_names, list_runs, most_recent_resumable, reconcile_state_with_log,
+    resolve_target, validate_resume, ResumeError, RunListing, RunState, RunStatus,
 };
 pub use worktree::{
     merge_scratchpad_into_run, parallel_safe_violation_summary, session_branch_name,

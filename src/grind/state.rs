@@ -233,6 +233,26 @@ pub enum ResumeError {
         /// Prompts present at run start but not now.
         removed: Vec<String>,
     },
+    /// `state.json`'s `last_session_seq` disagrees with the actual tail of
+    /// `sessions.jsonl`. This happens when the host process died between the
+    /// JSONL append and the `state.json` write — the scheduler / budget
+    /// snapshot is then one session behind the source-of-truth log, and a
+    /// blind resume would re-dispatch the missing session under a colliding
+    /// seq. Refusing here keeps the run repairable by hand instead of
+    /// silently doubling a session record.
+    #[error(
+        "grind run {run_id:?}: state.json out of sync with sessions.jsonl (state says \
+         last_session_seq={state_seq}, log tail has {jsonl_seq}); start a new run or repair \
+         state.json by hand"
+    )]
+    StateOutOfSync {
+        /// Requested run id.
+        run_id: String,
+        /// `last_session_seq` from the cached `state.json`.
+        state_seq: u32,
+        /// Highest seq actually present in `sessions.jsonl` (`0` when empty).
+        jsonl_seq: u32,
+    },
 }
 
 /// Compare the persisted `prompt_names` against the current plan's prompt
@@ -322,6 +342,34 @@ pub fn validate_resume(
         });
     }
     Ok(listing)
+}
+
+/// Cross-check the cached `state.json.last_session_seq` against the actual
+/// tail of `sessions.jsonl`. Returns `Ok(())` only when both agree; otherwise
+/// returns [`ResumeError::StateOutOfSync`] so the resume path can refuse to
+/// continue.
+///
+/// `sessions.jsonl` is the source of truth (see `run_dir.rs` docs). A divergence
+/// means the host process crashed between the JSONL append for session N and
+/// the `state.json` write that would have advanced `last_session_seq` to N.
+/// Resuming with a stale `state.last_session_seq` would set
+/// `next_seq = stale + 1` and re-dispatch a session whose record already
+/// exists, producing two JSONL lines with the same `seq`.
+pub fn reconcile_state_with_log(
+    run_id: &str,
+    state_seq: u32,
+    log_records: &[super::run_dir::SessionRecord],
+) -> Result<(), ResumeError> {
+    let jsonl_seq = log_records.iter().map(|r| r.seq).max().unwrap_or(0);
+    if jsonl_seq == state_seq {
+        Ok(())
+    } else {
+        Err(ResumeError::StateOutOfSync {
+            run_id: run_id.to_string(),
+            state_seq,
+            jsonl_seq,
+        })
+    }
 }
 
 /// Helper used by both initial-write and per-session-write paths. Builds a
@@ -581,5 +629,76 @@ mod tests {
         let dir = repo.path().join(".pitboss/grind/no-state");
         fs::create_dir_all(&dir).unwrap();
         assert!(list_runs(repo.path()).is_empty());
+    }
+
+    fn fixture_session_record(seq: u32) -> super::super::run_dir::SessionRecord {
+        use super::super::run_dir::{SessionRecord, SessionStatus};
+        use crate::git::CommitId;
+        use crate::state::TokenUsage;
+        use std::path::PathBuf;
+        SessionRecord {
+            seq,
+            run_id: "rid".into(),
+            prompt: "alpha".into(),
+            started_at: "2026-04-30T18:00:00Z".parse().unwrap(),
+            ended_at: "2026-04-30T18:01:00Z".parse().unwrap(),
+            status: SessionStatus::Ok,
+            summary: Some(format!("session {seq}")),
+            commit: Some(CommitId::new(format!("abc{seq:040}"))),
+            tokens: TokenUsage::default(),
+            cost_usd: 0.0,
+            transcript_path: PathBuf::from(format!("transcripts/session-{seq:04}.log")),
+        }
+    }
+
+    #[test]
+    fn reconcile_passes_when_state_seq_matches_jsonl_tail() {
+        let records = vec![
+            fixture_session_record(1),
+            fixture_session_record(2),
+            fixture_session_record(3),
+        ];
+        assert!(reconcile_state_with_log("rid", 3, &records).is_ok());
+    }
+
+    #[test]
+    fn reconcile_passes_on_empty_log_with_zero_state() {
+        let records: Vec<super::super::run_dir::SessionRecord> = Vec::new();
+        assert!(reconcile_state_with_log("rid", 0, &records).is_ok());
+    }
+
+    #[test]
+    fn reconcile_rejects_when_jsonl_has_more_sessions_than_state() {
+        // The dangerous case: process died between JSONL append and state.json
+        // write. State says we're at seq=2 but the log has seq=3 — resuming
+        // would re-dispatch the same prompt and write seq=3 twice.
+        let records = vec![
+            fixture_session_record(1),
+            fixture_session_record(2),
+            fixture_session_record(3),
+        ];
+        let err = reconcile_state_with_log("rid", 2, &records).unwrap_err();
+        match err {
+            ResumeError::StateOutOfSync {
+                run_id,
+                state_seq,
+                jsonl_seq,
+            } => {
+                assert_eq!(run_id, "rid");
+                assert_eq!(state_seq, 2);
+                assert_eq!(jsonl_seq, 3);
+            }
+            other => panic!("expected StateOutOfSync, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconcile_rejects_when_state_claims_more_than_jsonl_has() {
+        // The reverse mismatch: state claims a session that never made it to
+        // the log. Equally bad — the scheduler / budget snapshot is ahead of
+        // the source-of-truth log.
+        let records = vec![fixture_session_record(1)];
+        let err = reconcile_state_with_log("rid", 5, &records).unwrap_err();
+        assert!(matches!(err, ResumeError::StateOutOfSync { .. }));
     }
 }

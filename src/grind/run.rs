@@ -1115,25 +1115,19 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
     }
 
     // ---- post_session / on_failure hooks ------------------------------
-    let mut hook_env = base_env.clone();
-    hook_env.insert("PITBOSS_SESSION_PROMPT".into(), prompt.meta.name.clone());
-    hook_env.insert("PITBOSS_SESSION_STATUS".into(), status.as_str().to_string());
-    hook_env.insert("PITBOSS_SESSION_SUMMARY".into(), summary.clone());
-    if let Some(cmd) = plan_hooks.post_session.as_deref() {
-        let _ = run_hook(
-            HookKind::PostSession,
-            cmd,
-            &hook_env,
-            hook_timeout,
-            &transcript_path,
-            &hook_passthrough,
-        )
-        .await;
-    }
-    if status != SessionStatus::Ok {
-        if let Some(cmd) = plan_hooks.on_failure.as_deref() {
+    // An Aborted session is the user's exit signal (Ctrl-C → Ctrl-C). Running
+    // post_session / on_failure hooks here would block the process for up to
+    // hook_timeout_secs apiece — exactly the opposite of what the second
+    // Ctrl-C asked for. Skip both kinds on Aborted; pre_session already ran
+    // (or didn't) before the abort fired.
+    if status != SessionStatus::Aborted {
+        let mut hook_env = base_env.clone();
+        hook_env.insert("PITBOSS_SESSION_PROMPT".into(), prompt.meta.name.clone());
+        hook_env.insert("PITBOSS_SESSION_STATUS".into(), status.as_str().to_string());
+        hook_env.insert("PITBOSS_SESSION_SUMMARY".into(), summary.clone());
+        if let Some(cmd) = plan_hooks.post_session.as_deref() {
             let _ = run_hook(
-                HookKind::OnFailure,
+                HookKind::PostSession,
                 cmd,
                 &hook_env,
                 hook_timeout,
@@ -1141,6 +1135,19 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
                 &hook_passthrough,
             )
             .await;
+        }
+        if status != SessionStatus::Ok {
+            if let Some(cmd) = plan_hooks.on_failure.as_deref() {
+                let _ = run_hook(
+                    HookKind::OnFailure,
+                    cmd,
+                    &hook_env,
+                    hook_timeout,
+                    &transcript_path,
+                    &hook_passthrough,
+                )
+                .await;
+            }
         }
     }
 

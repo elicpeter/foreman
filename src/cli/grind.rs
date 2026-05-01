@@ -26,8 +26,8 @@ use crate::agent::{self, Agent};
 use crate::config::{self, Config};
 use crate::git::{self, Git, ShellGit};
 use crate::grind::{
-    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, render_dry_run_report,
-    resolve_budgets, resolve_target, run_branch_name,
+    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, reconcile_state_with_log,
+    render_dry_run_report, resolve_budgets, resolve_target, run_branch_name,
     sweep_stale_session_worktrees as pitboss_grind_sweep, validate_resume, DiscoveryOptions,
     DryRunInputs, ExitCode, GrindPlan, GrindRunner, GrindShutdown, GrindStopReason, PlanBudgets,
     PromptDoc, ResumeError, RunDir, RunListing, SessionRecord, SessionStatus,
@@ -57,9 +57,17 @@ pub struct GrindArgs {
     /// On a successful run (exit code 0), open a pull request via
     /// `gh pr create` for the per-run branch. Title is
     /// `grind/<plan>: <run-id>`; body is the run's `sessions.md` verbatim.
-    /// Mirrors `pitboss play --pr`.
+    /// Mirrors `pitboss play --pr`. By default a failing PR call is logged but
+    /// does not change the exit code; pair with `--require-pr` to enforce.
     #[arg(long)]
     pub pr: bool,
+    /// When `--pr` is also set, treat a failed `gh pr create` call as a
+    /// run-level failure: the process exits with code 6 instead of 0 even when
+    /// every session resolved cleanly. Use this in CI scripts that need to
+    /// distinguish "the PR shipped" from "the work shipped but the PR step
+    /// failed". No effect without `--pr`.
+    #[arg(long = "require-pr")]
+    pub require_pr: bool,
     /// Stop after this many sessions have been dispatched. Overrides
     /// `[grind.budgets] max_iterations` from `pitboss.toml` and the plan's
     /// `PlanBudgets`.
@@ -98,7 +106,8 @@ const GRIND_AFTER_HELP: &str = "Exit codes:
   2  Aborted — second Ctrl-C (or external SIGINT) cancelled the run.
   3  Budget exhausted — --max-iterations / --until / --max-cost / --max-tokens hit.
   4  Failed to start — config / discovery / git / resume pre-flight refused the run.
-  5  Consecutive failures — `[grind] consecutive_failure_limit` tripped.";
+  5  Consecutive failures — `[grind] consecutive_failure_limit` tripped.
+  6  PR creation failed — `--pr --require-pr` was set and `gh pr create` failed.";
 
 fn parse_rfc3339(s: &str) -> std::result::Result<DateTime<Utc>, String> {
     DateTime::parse_from_rfc3339(s)
@@ -276,13 +285,7 @@ where
     );
 
     let exit = classify_outcome(&outcome.stop_reason, &outcome.sessions);
-    if args.pr && exit == ExitCode::Success {
-        let pr_git = ShellGit::new(workspace.clone());
-        match open_post_run_grind_pr(&pr_git, &workspace, &outcome.run_id, &plan_name).await {
-            Ok(url) => announce_pr_opened(&url),
-            Err(e) => announce_pr_failed(&e),
-        }
-    }
+    let exit = maybe_open_pr(&workspace, &outcome.run_id, &plan_name, args, exit).await;
     Ok(exit)
 }
 
@@ -355,6 +358,29 @@ where
             return Ok(ExitCode::FailedToStart);
         }
     };
+
+    // Cross-check the cached `state.last_session_seq` against the actual tail
+    // of `sessions.jsonl`. A mismatch means the host process died between the
+    // JSONL append and the state.json write — resuming with the stale cached
+    // seq would re-dispatch the missing session under a colliding seq, leaving
+    // two JSONL records with the same number. Better to refuse and let the
+    // user repair by hand than silently corrupt the log.
+    let log_records = match run_dir.log().records() {
+        Ok(r) => r,
+        Err(e) => {
+            print_failed_to_start(&format!(
+                "resume {:?}: reading sessions.jsonl: {e:#}",
+                listing.run_id
+            ));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+    if let Err(e) =
+        reconcile_state_with_log(&listing.run_id, listing.state.last_session_seq, &log_records)
+    {
+        print_failed_to_start(&render_resume_error(&e));
+        return Ok(ExitCode::FailedToStart);
+    }
 
     // Sweep parallel-session worktrees the original run left behind. If
     // pitboss died mid-flight the directories at
@@ -435,14 +461,51 @@ where
     );
 
     let exit = classify_outcome(&outcome.stop_reason, &outcome.sessions);
-    if args.pr && exit == ExitCode::Success {
-        let pr_git = ShellGit::new(workspace.clone());
-        match open_post_run_grind_pr(&pr_git, &workspace, &outcome.run_id, &plan_name).await {
-            Ok(url) => announce_pr_opened(&url),
-            Err(e) => announce_pr_failed(&e),
-        }
-    }
+    let exit = maybe_open_pr(&workspace, &outcome.run_id, &plan_name, args, exit).await;
     Ok(exit)
+}
+
+/// Open the post-run PR if requested. Both the fresh-run and resume paths
+/// share this logic; centralizing it keeps the `--require-pr` policy in one
+/// place. The policy itself lives in [`pr_failure_exit_code`] so tests can
+/// pin it without spawning a runner.
+async fn maybe_open_pr(
+    workspace: &Path,
+    run_id: &str,
+    plan_name: &str,
+    args: &GrindArgs,
+    exit: ExitCode,
+) -> ExitCode {
+    if !args.pr || exit != ExitCode::Success {
+        return exit;
+    }
+    let pr_git = ShellGit::new(workspace.to_path_buf());
+    let pr_succeeded = match open_post_run_grind_pr(&pr_git, workspace, run_id, plan_name).await {
+        Ok(url) => {
+            announce_pr_opened(&url);
+            true
+        }
+        Err(e) => {
+            announce_pr_failed(&e);
+            false
+        }
+    };
+    pr_failure_exit_code(exit, args.require_pr, pr_succeeded)
+}
+
+/// Policy for `--require-pr`: when the underlying run succeeded and the user
+/// asked for a strict PR step, a failed `gh pr create` upgrades the exit code
+/// to [`ExitCode::PrCreationFailed`]. Without `--require-pr`, a PR failure is
+/// logged but the exit code is left untouched (the historical behavior that
+/// mirrors `pitboss play --pr`). When the run did not succeed, the original
+/// exit code is preserved — the underlying failure outranks any PR-step
+/// outcome. Public for the integration test crate.
+pub fn pr_failure_exit_code(prior: ExitCode, require_pr: bool, pr_succeeded: bool) -> ExitCode {
+    if pr_succeeded || !require_pr || prior != ExitCode::Success {
+        prior
+    } else {
+        ExitCode::PrCreationFailed
+    }
 }
 
 fn render_resume_error(e: &ResumeError) -> String {
@@ -674,4 +737,54 @@ fn announce_pr_failed(err: &anyhow::Error) {
         "{} PR creation failed: {err:#}",
         col(c, style::BOLD_RED, "[pitboss]"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pr_failure_without_require_keeps_prior_exit() {
+        // The historical behavior — failure is logged, exit code is whatever
+        // the run resolved to.
+        assert_eq!(
+            pr_failure_exit_code(ExitCode::Success, false, false),
+            ExitCode::Success
+        );
+    }
+
+    #[test]
+    fn pr_success_keeps_prior_exit_regardless_of_require_pr() {
+        assert_eq!(
+            pr_failure_exit_code(ExitCode::Success, false, true),
+            ExitCode::Success
+        );
+        assert_eq!(
+            pr_failure_exit_code(ExitCode::Success, true, true),
+            ExitCode::Success
+        );
+    }
+
+    #[test]
+    fn require_pr_with_failed_call_upgrades_to_pr_creation_failed() {
+        assert_eq!(
+            pr_failure_exit_code(ExitCode::Success, true, false),
+            ExitCode::PrCreationFailed
+        );
+    }
+
+    #[test]
+    fn require_pr_does_not_overwrite_a_non_success_prior() {
+        // The underlying failure outranks the PR step. If the run already
+        // failed, the original exit code wins so a CI script can still see the
+        // root cause instead of the post-step artifact.
+        assert_eq!(
+            pr_failure_exit_code(ExitCode::MixedFailures, true, false),
+            ExitCode::MixedFailures
+        );
+        assert_eq!(
+            pr_failure_exit_code(ExitCode::Aborted, true, false),
+            ExitCode::Aborted
+        );
+    }
 }

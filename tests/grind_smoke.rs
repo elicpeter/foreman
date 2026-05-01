@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use pitboss::agent::{Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason};
@@ -36,6 +36,12 @@ struct MockAgent {
     summary_template: String,
     invocations: Arc<AtomicU32>,
     expected_run_id: String,
+    /// Optional pair of channels for tests that need a deterministic sync
+    /// point per session. When set, the agent: (1) sends the session seq on
+    /// `started_tx` after writing summary/marker, then (2) acquires one
+    /// permit from `proceed` before returning. The test drives the sequence
+    /// by reading the started signal and adding permits as needed.
+    gate: Option<(mpsc::UnboundedSender<u32>, Arc<Semaphore>)>,
 }
 
 impl MockAgent {
@@ -46,7 +52,19 @@ impl MockAgent {
             summary_template: "session ran for {prompt} #{seq}".into(),
             invocations,
             expected_run_id: expected_run_id.into(),
+            gate: None,
         }
+    }
+
+    fn gated(
+        invocations: Arc<AtomicU32>,
+        expected_run_id: &str,
+        started_tx: mpsc::UnboundedSender<u32>,
+        proceed: Arc<Semaphore>,
+    ) -> Self {
+        let mut me = Self::new(invocations, expected_run_id);
+        me.gate = Some((started_tx, proceed));
+        me
     }
 }
 
@@ -153,6 +171,21 @@ impl Agent for MockAgent {
         let _ = events
             .send(AgentEvent::Stdout(format!("[mock] {prompt_name}#{seq}")))
             .await;
+
+        // Gated mode: signal the test we've reached the end of dispatch, then
+        // block until the test grants a permit. This gives the test a
+        // deterministic point to (a) trip the drain flag before the runner
+        // can spin up the next session, and (b) verify how many sessions
+        // actually ran.
+        if let Some((started_tx, proceed)) = &self.gate {
+            let _ = started_tx.send(n);
+            let permit = proceed
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("proceed semaphore closed unexpectedly");
+            permit.forget();
+        }
 
         Ok(AgentOutcome {
             exit_code: 0,
@@ -370,54 +403,104 @@ async fn run_directory_layout_matches_spec() {
 }
 
 /// A drain triggered after session 2 finishes must let session 2 land cleanly
-/// and prevent session 3 from starting.
+/// and prevent session 3 from starting. Uses a gated mock-agent so the test
+/// can deterministically interleave drain-vs-dispatch: drain is set while the
+/// agent is still inside session 2's dispatch, so the next-iteration drain
+/// check is guaranteed to see it before any session 3 spawns.
 #[tokio::test]
 async fn drain_after_session_two_skips_session_three() {
     let dir = tempfile::tempdir().unwrap();
     let invocations = Arc::new(AtomicU32::new(0));
     let branch = pitboss::grind::run_branch_name(RUN_ID);
-    let (mut runner, log) = make_runner(dir.path(), &branch, invocations.clone()).await;
+
+    // Build a gated runner by hand (the make_runner helper uses the
+    // ungated MockAgent constructor).
+    init_git_repo(dir.path());
+    let git = ShellGit::new(dir.path());
+    git.create_branch(&branch).await.unwrap();
+    git.checkout(&branch).await.unwrap();
+
+    let prompts = vec![
+        fake_prompt("alpha", "alpha prompt body"),
+        fake_prompt("bravo", "bravo prompt body"),
+        fake_prompt("charlie", "charlie prompt body"),
+    ];
+    let plan = pitboss::grind::default_plan_from_dir(&prompts);
+    let run_dir = RunDir::create(dir.path(), RUN_ID).expect("create run dir");
+    let log = run_dir.log().clone();
+
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel::<u32>();
+    let proceed = Arc::new(Semaphore::new(0));
+    let runner_git = ShellGit::new(dir.path());
+    let mut runner = GrindRunner::new(
+        dir.path().to_path_buf(),
+        Config::default(),
+        RUN_ID.to_string(),
+        branch.clone(),
+        plan,
+        lookup(&prompts),
+        run_dir,
+        MockAgent::gated(invocations.clone(), RUN_ID, started_tx, proceed.clone()),
+        runner_git,
+        PlanBudgets::default(),
+        3,
+    );
 
     let shutdown = GrindShutdown::new();
 
-    // Spawn a watcher that drains as soon as the second session has finished
-    // recording its commit. Polling on the JSONL line count is a clean signal
-    // that the session has fully resolved (commit + log append).
-    let log_for_watch = log.clone();
-    let watch_shutdown = shutdown.clone();
-    let watcher = tokio::spawn(async move {
-        loop {
-            if let Ok(records) = log_for_watch.records() {
-                if records.len() >= 2 {
-                    watch_shutdown.drain();
-                    return;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    });
+    // Drive runner concurrently so the test thread can step it through
+    // sessions one at a time.
+    let runner_shutdown = shutdown.clone();
+    let runner_handle =
+        tokio::spawn(async move { runner.run(runner_shutdown).await.unwrap() });
 
-    let outcome = runner.run(shutdown).await.unwrap();
-    let _ = watcher.await;
+    // Step session 1: receive the entry signal, then release.
+    let n1 = started_rx.recv().await.expect("session 1 start signal");
+    assert_eq!(n1, 1);
+    proceed.add_permits(1);
 
-    // The runner checks drain at the top of each loop iteration. Session 2's
-    // commit and log append happen *before* the watcher trips drain, but the
-    // watcher's check vs. the runner's next-loop check is a race: drain may
-    // win before session 3 starts (most common) or session 3 may begin first.
-    // Either way the run must stop within one extra session — so the upper
-    // bound is 3.
-    assert!(
-        (2..=3).contains(&outcome.sessions.len()),
-        "expected 2-3 sessions after drain, got {}",
+    // Step session 2: receive the entry signal. Set drain BEFORE releasing
+    // the agent so the runner's next-iteration drain check is guaranteed to
+    // see it. (If we released first, the runner would race ahead and could
+    // dispatch session 3 between our log-poll and our drain call — which is
+    // exactly the flake the deferred item called out.)
+    let n2 = started_rx.recv().await.expect("session 2 start signal");
+    assert_eq!(n2, 2);
+    shutdown.drain();
+    proceed.add_permits(1);
+
+    // Drain rx so we can prove session 3 never started. Closing the test
+    // channel is what would happen if a 3rd dispatch tried to send on a
+    // dropped sender, but here we keep the sender alive in the agent — so
+    // the right thing to assert is that the runner finishes and *then*
+    // started_rx is empty.
+    let outcome = runner_handle.await.expect("runner task panicked");
+
+    // Strict bound: exactly two sessions ran. Earlier this was 2..=3 because
+    // the polling watcher couldn't win the race; the gated mock removes the
+    // race entirely.
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        2,
+        "exactly two dispatches should have fired; session 3 must not start"
+    );
+    assert_eq!(
+        outcome.sessions.len(),
+        2,
+        "expected exactly 2 sessions after drain, got {}",
         outcome.sessions.len()
     );
     assert_eq!(outcome.stop_reason, GrindStopReason::Drained);
-    let records = log.records().unwrap();
-    assert_eq!(
-        records.len(),
-        outcome.sessions.len(),
-        "JSONL records must match the runner's session count"
+
+    // No further start signals were emitted (session 3 never began dispatch).
+    assert!(
+        started_rx.try_recv().is_err(),
+        "no start signal should have been emitted for a third session"
     );
+
+    // JSONL log mirrors the count.
+    let records = log.records().unwrap();
+    assert_eq!(records.len(), 2);
     for r in &records {
         assert_eq!(r.status, SessionStatus::Ok);
     }
