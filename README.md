@@ -76,7 +76,7 @@ Each tagged release ships static builds on the [Releases page](https://github.co
 Pick the archive that matches your platform, verify the checksum, and drop the binary on your `PATH`:
 
 ```sh
-TAG=v0.1.0                                # whichever release you want
+TAG=v0.2.0                                # whichever release you want
 TARGET=aarch64-apple-darwin               # or x86_64-apple-darwin / x86_64-unknown-linux-gnu
 ARCHIVE="pitboss-${TAG}-${TARGET}.tar.gz"
 
