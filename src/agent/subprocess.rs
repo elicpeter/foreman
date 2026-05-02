@@ -153,14 +153,17 @@ pub async fn run_logged_with_stdin(
         }
     };
 
-    // Drain both readers (they exit on EOF once the child is gone) and flush
-    // the log so `log_path` reflects everything the process emitted.
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    // Drain both readers and flush the log. We bound the drain: if any
+    // grandchild process inherited the pipe write-end (e.g. a bash tool or MCP
+    // server spawned by the agent), EOF won't arrive until it exits, which can
+    // hang indefinitely even though the agent process itself is gone. Five
+    // seconds is enough to capture any in-flight output; beyond that we abort.
+    let drain_timeout = Duration::from_secs(5);
+    let _ = tokio::time::timeout(drain_timeout, stdout_task).await;
+    let _ = tokio::time::timeout(drain_timeout, stderr_task).await;
     if let Some(task) = stdin_task {
-        // Once the child has exited, the writer either finished or hit EPIPE.
-        // Either way the task is about to complete, so just await it.
-        let _ = task.await;
+        // The writer either finished or hit EPIPE; give it the same window.
+        let _ = tokio::time::timeout(drain_timeout, task).await;
     }
     let mut f = log.lock().await;
     let _ = f.flush().await;
