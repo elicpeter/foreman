@@ -4,3 +4,4 @@ Cargo.lock.bak
 .DS_Store
 /.idea
 .pitboss/
+pitboss-contributions.md
