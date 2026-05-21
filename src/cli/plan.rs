@@ -380,7 +380,7 @@ const MANIFEST_FILES: &[&str] = &[
 /// READMEs we surface verbatim (truncated). Lowercase variants are tried too.
 const README_FILES: &[&str] = &["README.md", "README", "README.txt", "README.rst"];
 
-fn collect_repo_summary(workspace: &Path) -> Result<String> {
+pub(crate) fn collect_repo_summary(workspace: &Path) -> Result<String> {
     let mut sections: Vec<String> = Vec::new();
     sections.push(format!(
         "Top-level entries:\n{}",
