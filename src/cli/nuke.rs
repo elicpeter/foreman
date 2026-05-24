@@ -77,8 +77,11 @@ fn confirm() -> Result<bool> {
     std::io::stdin()
         .read_line(&mut line)
         .context("nuke: reading confirmation")?;
-    let answer = line.trim().to_lowercase();
-    Ok(answer == "y" || answer == "yes")
+    Ok(is_yes_answer(&line))
+}
+
+fn is_yes_answer(answer: &str) -> bool {
+    answer.trim().to_ascii_lowercase().starts_with('y')
 }
 
 #[cfg(not(test))]
@@ -123,5 +126,16 @@ mod tests {
         );
         // Critical: .pitboss/ must still exist after the bail.
         assert!(dir.path().join(".pitboss").is_dir());
+    }
+
+    #[test]
+    fn accepts_any_yes_prefix() {
+        assert!(is_yes_answer("y"));
+        assert!(is_yes_answer("yes"));
+        assert!(is_yes_answer("YEP"));
+        assert!(is_yes_answer("  yolo  "));
+        assert!(!is_yes_answer(""));
+        assert!(!is_yes_answer("n"));
+        assert!(!is_yes_answer("nope"));
     }
 }

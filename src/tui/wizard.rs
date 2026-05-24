@@ -281,6 +281,11 @@ async fn run_wizard_inner(initial_state: WizState) -> Result<Option<WizardResult
                             Ev::Done(r) => break Some(r),
                         }
                     }
+                    Some(Ok(CtEvent::Paste(text))) => match on_paste(&mut state, &text) {
+                        Ev::Continue => {}
+                        Ev::Quit => break None,
+                        Ev::Done(r) => break Some(r),
+                    },
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
                     None => break None,
@@ -307,6 +312,20 @@ fn on_key(s: &mut WizState, code: KeyCode, mods: KeyModifiers) -> Ev {
         Step::Tests => tests_key(s, code),
         Step::Confirm => confirm_key(s, code),
     }
+}
+
+fn on_paste(s: &mut WizState, text: &str) -> Ev {
+    if !matches!(s.step, Step::Budget | Step::Sweep | Step::Tests) {
+        return Ev::Continue;
+    }
+    for ch in text.chars() {
+        match on_key(s, KeyCode::Char(ch), KeyModifiers::empty()) {
+            Ev::Continue => {}
+            Ev::Quit => return Ev::Quit,
+            Ev::Done(result) => return Ev::Done(result),
+        }
+    }
+    Ev::Continue
 }
 
 fn welcome_key(s: &mut WizState, code: KeyCode) -> Ev {
@@ -1265,4 +1284,35 @@ fn render_confirm(f: &mut ratatui::Frame<'_>, area: Rect, state: &WizState) {
         hint("[↑↓] select    [Enter] confirm    [Esc] back"),
         chunks[7],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn paste_budget_input_respects_existing_field_rules() {
+        let dir = tempdir().unwrap();
+        let mut state = WizState::new(dir.path());
+        state.step = Step::Budget;
+
+        state.budget_field = BudgetField::Usd;
+        on_paste(&mut state, "12a.3.4");
+        assert_eq!(state.budget_usd_input, "12.34");
+
+        state.budget_field = BudgetField::Tokens;
+        on_paste(&mut state, "1x2y3");
+        assert_eq!(state.budget_tokens_input, "123");
+    }
+
+    #[test]
+    fn paste_updates_test_command_field() {
+        let dir = tempdir().unwrap();
+        let mut state = WizState::new(dir.path());
+        state.step = Step::Tests;
+
+        on_paste(&mut state, "cargo test --workspace");
+        assert_eq!(state.test_input, "cargo test --workspace");
+    }
 }

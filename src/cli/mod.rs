@@ -103,8 +103,8 @@ pub enum Command {
         force: bool,
     },
     /// Universal entry point. Auto-detects whether `.pitboss/` exists:
-    /// without it, runs the setup wizard and chains into `play --tui`; with
-    /// it, opens the iteration wizard (current budget, deferred items, and
+    /// without it, runs the setup wizard and prints next steps; with it,
+    /// opens the iteration wizard (current budget, deferred items, and
     /// completed phases) and offers continue / sweep / new-plan paths.
     Start,
     /// Completely remove pitboss from the workspace. Deletes the

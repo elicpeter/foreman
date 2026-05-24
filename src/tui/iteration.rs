@@ -992,10 +992,35 @@ fn display_cursor(value: &str, cursor: usize) -> String {
 fn cursor_auto_scroll(text: &str, cursor: usize, inner_w: u16, inner_h: u16) -> u16 {
     let iw = inner_w.max(1) as usize;
     let ih = inner_h.max(1) as usize;
-    let cursor_line = cursor / iw;
-    let total = (text.chars().count() + 1).div_ceil(iw).max(1);
+    let cursor_line = visual_cursor_line(text, cursor, iw);
+    let total = visual_line_count(text, iw);
     let max_scroll = total.saturating_sub(ih) as u16;
     (cursor_line.saturating_sub(ih.saturating_sub(1)) as u16).min(max_scroll)
+}
+
+fn visual_line_count(text: &str, inner_w: usize) -> usize {
+    let iw = inner_w.max(1);
+    text.split('\n')
+        .map(|line| line.chars().count().div_ceil(iw).max(1))
+        .sum::<usize>()
+        .max(1)
+}
+
+fn visual_cursor_line(text: &str, cursor: usize, inner_w: usize) -> usize {
+    let iw = inner_w.max(1);
+    let mut remaining = cursor.min(text.chars().count());
+    let mut line_index = 0usize;
+
+    for line in text.split('\n') {
+        let len = line.chars().count();
+        if remaining <= len {
+            return line_index + (remaining / iw);
+        }
+        line_index += len.div_ceil(iw).max(1);
+        remaining = remaining.saturating_sub(len + 1);
+    }
+
+    line_index
 }
 
 /// Expand `[Pasted text #N]` placeholders back to the original pasted text
@@ -1157,11 +1182,11 @@ fn text_input_widget(
     };
     let inner_w = area.width.saturating_sub(2).max(1) as usize;
     let inner_h = area.height.saturating_sub(2).max(1) as usize;
-    let total_lines = display.chars().count().div_ceil(inner_w).max(1);
+    let total_lines = visual_line_count(&display, inner_w);
     let max_scroll = total_lines.saturating_sub(inner_h) as u16;
     let auto_scroll = match cursor_pos {
         Some(pos) => {
-            let cursor_line = pos / inner_w;
+            let cursor_line = visual_cursor_line(value, pos, inner_w);
             let min_scroll = cursor_line.saturating_sub(inner_h.saturating_sub(1)) as u16;
             min_scroll.min(max_scroll)
         }
@@ -1716,4 +1741,30 @@ fn render_plan_review(f: &mut ratatui::Frame<'_>, area: Rect, state: &IterState)
         hint("[↑↓] select  [Enter] confirm  [Ctrl+C] quit"),
         chunks[6],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visual_line_count_handles_wrapping_and_newlines() {
+        assert_eq!(visual_line_count("abcd", 4), 1);
+        assert_eq!(visual_line_count("abcde", 4), 2);
+        assert_eq!(visual_line_count("ab\ncd", 4), 2);
+        assert_eq!(visual_line_count("12345\nx", 4), 3);
+    }
+
+    #[test]
+    fn visual_cursor_line_accounts_for_explicit_newlines() {
+        assert_eq!(visual_cursor_line("ab\ncd", 2, 4), 0);
+        assert_eq!(visual_cursor_line("ab\ncd", 3, 4), 1);
+        assert_eq!(visual_cursor_line("1234\nx", 4, 4), 1);
+    }
+
+    #[test]
+    fn cursor_auto_scroll_supports_multiline_paste_content() {
+        let scroll = cursor_auto_scroll("abcd\nefgh\nijkl", 14, 4, 2);
+        assert_eq!(scroll, 1);
+    }
 }

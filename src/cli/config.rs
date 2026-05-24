@@ -169,7 +169,7 @@ fn write_config(workspace: &Path, result: &WizardResult) -> Result<()> {
 
     let audit_enabled = result.audit_enabled;
     let sweep_enabled = result.sweep_enabled;
-    let sweep_min = result.sweep_threshold.unwrap_or(5);
+    let sweep_min = result.sweep_threshold.unwrap_or(5).max(1);
     // Pitboss requires `trigger_min_items <= trigger_max_items` (default
     // max = 8). The wizard only collects min, so when the user picks a
     // threshold above 8 we lift max alongside it with a small buffer so
@@ -381,6 +381,19 @@ mod tests {
             cfg.sweep.trigger_max_items,
             cfg.sweep.trigger_min_items
         );
+    }
+
+    #[test]
+    fn write_config_zero_sweep_threshold_clamps_to_one() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path();
+        std::fs::create_dir_all(ws.join(".pitboss")).unwrap();
+        let mut r = default_result();
+        r.sweep_threshold = Some(0);
+        write_config(ws, &r).expect("write_config");
+        let cfg = crate::config::load(ws).expect("load round-trips");
+        assert_eq!(cfg.sweep.trigger_min_items, 1);
+        assert!(cfg.sweep.trigger_max_items >= cfg.sweep.trigger_min_items);
     }
 
     /// User-supplied budget caps must reach the config; the missing-cap path
