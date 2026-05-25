@@ -175,6 +175,32 @@ pub fn run(workspace: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
+/// Create the directory structure, state file, and `.gitignore` entry without
+/// writing any template content files. Used by `pitboss setup`, which
+/// provides its own `plan.md` and `config.toml` via the wizard.
+pub(crate) fn scaffold_dirs(workspace: &Path) -> Result<()> {
+    fs::create_dir_all(workspace)
+        .with_context(|| format!("init: creating workspace {:?}", workspace))?;
+
+    let pitboss_root = workspace.join(".pitboss");
+    if pitboss_root.exists() && !pitboss_root.is_dir() {
+        anyhow::bail!(
+            "init: {:?} exists but is not a directory; refusing to overwrite",
+            pitboss_root
+        );
+    }
+
+    let mut report = Vec::new();
+    ensure_dir(workspace, ".pitboss/play/snapshots", &mut report)?;
+    ensure_dir(workspace, ".pitboss/play/logs", &mut report)?;
+    ensure_dir(workspace, ".pitboss/grind/prompts", &mut report)?;
+    ensure_dir(workspace, ".pitboss/grind/rotations", &mut report)?;
+    ensure_dir(workspace, ".pitboss/grind/runs", &mut report)?;
+    init_state_file(workspace, &mut report)?;
+    update_gitignore(workspace, &mut report)?;
+    Ok(())
+}
+
 fn write_if_missing(
     workspace: &Path,
     rel: &str,
