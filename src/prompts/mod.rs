@@ -36,7 +36,6 @@ const SWEEP_FIXER_TEMPLATE: &str = include_str!("templates/sweep_fixer.txt");
 const SWEEP_AUDITOR_TEMPLATE: &str = include_str!("templates/sweep_auditor.txt");
 const PLANNER_TEMPLATE: &str = include_str!("templates/planner.txt");
 const QUESTIONER_TEMPLATE: &str = include_str!("templates/questioner.txt");
-const QUESTIONER_RANGED_TEMPLATE: &str = include_str!("templates/questioner_ranged.txt");
 
 /// Approximate ceiling on the static portion of any single template.
 ///
@@ -116,29 +115,6 @@ pub fn questioner(goal: &str, repo_summary: &str, max_questions: u32) -> String 
         &[
             ("goal", goal),
             ("repo_summary", repo_summary),
-            ("max_questions", &max),
-        ],
-    )
-}
-
-/// Render the ranged questioner prompt used by the wizard's interview flow.
-/// Tells the agent to produce between `min_questions` and `max_questions`
-/// (inclusive) — strict bounds so user-selected ranges like 1-5 actually
-/// produce 1-5 questions rather than the legacy 20+ default.
-pub fn questioner_ranged(
-    goal: &str,
-    repo_summary: &str,
-    min_questions: u32,
-    max_questions: u32,
-) -> String {
-    let min = min_questions.to_string();
-    let max = max_questions.to_string();
-    render(
-        QUESTIONER_RANGED_TEMPLATE,
-        &[
-            ("goal", goal),
-            ("repo_summary", repo_summary),
-            ("min_questions", &min),
             ("max_questions", &max),
         ],
     )
@@ -628,7 +604,6 @@ mod tests {
             ("sweep_auditor", SWEEP_AUDITOR_TEMPLATE),
             ("planner", PLANNER_TEMPLATE),
             ("questioner", QUESTIONER_TEMPLATE),
-            ("questioner_ranged", QUESTIONER_RANGED_TEMPLATE),
         ] {
             assert!(
                 body.len() <= TEMPLATE_STATIC_BUDGET,
