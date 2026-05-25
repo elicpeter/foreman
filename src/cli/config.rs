@@ -9,7 +9,7 @@
 //!
 //! Aliased as `pitboss setup` for backwards compatibility — the wizard-
 //! execution body is exposed as the crate-internal helper
-//! [`run_config_wizard`] so `pitboss start` can reuse the create flow.
+//! `run_config_wizard` so `pitboss start` can reuse the create flow.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
