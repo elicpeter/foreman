@@ -15,6 +15,8 @@
 
 mod app;
 pub mod grind;
+pub mod iteration;
+pub mod wizard;
 
 pub use app::{Activity, AgentDisplay, App, PhaseStatus, UsageView, OUTPUT_BUFFER_LINES};
 
@@ -23,8 +25,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode, KeyEventKind,
-    KeyModifiers,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -185,7 +187,12 @@ impl TerminalGuard {
     pub(crate) fn setup() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(e) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        ) {
             let _ = disable_raw_mode();
             return Err(e.into());
         }
@@ -215,7 +222,8 @@ impl TerminalGuard {
         execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         )?;
         self.terminal.show_cursor()?;
         self.active = false;
@@ -233,7 +241,8 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         );
         let _ = self.terminal.show_cursor();
     }

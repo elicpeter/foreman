@@ -14,15 +14,18 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+pub mod config;
 pub mod exit_code;
 pub mod fold;
 pub mod grind;
 pub mod init;
 pub mod interview;
+pub mod nuke;
 pub mod plan;
 pub mod play;
 pub mod prompts;
 pub mod rebuy;
+pub mod start;
 pub mod status;
 pub mod sweep;
 
@@ -66,12 +69,18 @@ impl Cli {
         match &self.command {
             Command::Play { tui, .. } | Command::Rebuy { tui, .. } => *tui,
             Command::Grind(args) => args.tui,
+            // Config and Start both run a full-screen wizard in alternate
+            // mode — suppress the fmt layer so tracing output doesn't corrupt
+            // the terminal buffer. (Start may also chain into `play --tui`,
+            // which keeps the same alternate-screen mode active.)
+            Command::Config { .. } | Command::Start => true,
             Command::Init
             | Command::Plan { .. }
             | Command::Status
             | Command::Fold { .. }
             | Command::Sweep(_)
-            | Command::Prompts(_) => false,
+            | Command::Prompts(_)
+            | Command::Nuke => false,
         }
     }
 }
@@ -80,6 +89,28 @@ impl Cli {
 pub enum Command {
     /// Scaffold a new pitboss workspace in the current directory.
     Init,
+    /// Interactive TUI wizard for `.pitboss/config.toml`. On a fresh
+    /// workspace, walks the user through every config knob (models, budget,
+    /// sweeps, auditor, tests). On an existing workspace, opens straight to
+    /// a summary of current settings with an option to edit. Aliased as
+    /// `setup` for backwards compatibility.
+    #[command(alias = "setup")]
+    Config {
+        /// Accepted for backwards compatibility with `pitboss setup --force`.
+        /// No-op: `pitboss config` always allows re-editing an existing
+        /// workspace.
+        #[arg(long, hide = true)]
+        force: bool,
+    },
+    /// Universal entry point. Auto-detects whether `.pitboss/` exists:
+    /// without it, runs the setup wizard and prints next steps; with it,
+    /// opens the iteration wizard (current budget, deferred items, and
+    /// completed phases) and offers continue / sweep / new-plan paths.
+    Start,
+    /// Completely remove pitboss from the workspace. Deletes the
+    /// `.pitboss/` directory (config, plan, deferred items, state, all
+    /// logs) after a `y/N` confirmation. Cannot be undone.
+    Nuke,
     /// Generate a `plan.md` for a goal using the planner agent.
     Plan {
         /// Free-form description of what to build.
@@ -186,6 +217,18 @@ pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Init => {
             init::run(std::env::current_dir()?)?;
+            Ok(ExitCode::Success)
+        }
+        Command::Config { force: _ } => {
+            config::run(std::env::current_dir()?).await?;
+            Ok(ExitCode::Success)
+        }
+        Command::Start => {
+            start::run(std::env::current_dir()?).await?;
+            Ok(ExitCode::Success)
+        }
+        Command::Nuke => {
+            nuke::run(std::env::current_dir()?).await?;
             Ok(ExitCode::Success)
         }
         Command::Plan {
