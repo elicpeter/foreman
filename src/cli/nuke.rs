@@ -78,7 +78,7 @@ fn confirm() -> Result<bool> {
         .read_line(&mut line)
         .context("nuke: reading confirmation")?;
     let answer = line.trim().to_lowercase();
-    Ok(answer == "y" || answer == "yes")
+    Ok(answer.starts_with('y'))
 }
 
 #[cfg(not(test))]
