@@ -52,8 +52,18 @@ use crate::state::TokenUsage;
 
 use super::{
     subprocess::{self, SubprocessOutcome},
-    Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason,
+    Agent, AgentEvent, AgentOutcome, AgentRequest, Role, StopReason,
 };
+
+/// Tools the planner agent is forbidden from invoking. The planner's only
+/// output is the `plan.md` body emitted on stdout — letting it use Write/Edit
+/// causes it to silently create `plan.md` on disk and then send commentary
+/// text as its final assistant message. The runner's stdout collector then
+/// captures the commentary, the parser rejects it, and the on-disk file
+/// pitboss expected at `.pitboss/play/plan.md` is missing (the agent picked
+/// its own path). Explicitly disallowing FS-mutating tools forces the
+/// model back to the documented stdout-only contract.
+const PLANNER_DISALLOWED_TOOLS: &str = "Write,Edit,MultiEdit,NotebookEdit";
 
 /// Default binary name. Resolved against `PATH` by the OS.
 const DEFAULT_BINARY: &str = "claude";
@@ -279,6 +289,9 @@ impl ClaudeCodeAgent {
             .as_deref()
             .unwrap_or_else(|| resolve_permission_mode(model));
         cmd.args(["--permission-mode", permission_mode]);
+        if req.role == Role::Planner {
+            cmd.args(["--disallowedTools", PLANNER_DISALLOWED_TOOLS]);
+        }
         if !req.system_prompt.is_empty() {
             cmd.arg("--append-system-prompt").arg(&req.system_prompt);
         }
@@ -816,6 +829,75 @@ mod tests {
                 .any(|w| w[0] == "--permission-mode" && (w[1] == "auto" || w[1] == "acceptEdits")),
             "per-model default must not also appear: {args:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn build_command_disallows_fs_tools_for_planner_role() {
+        // Planner's contract is "emit plan.md body on stdout". If Write/Edit
+        // are available, models silently use them to write the file at a
+        // location of their own choosing and reply with chatty commentary
+        // instead — which the runner can't parse as plan.md. Forbid the
+        // FS-mutating tools on every planner dispatch.
+        let dir = tempfile::tempdir().unwrap();
+        let agent = ClaudeCodeAgent::with_binary("claude");
+        let req = AgentRequest {
+            role: Role::Planner,
+            model: "claude-opus-4-7".into(),
+            system_prompt: String::new(),
+            user_prompt: "u".into(),
+            workdir: dir.path().to_path_buf(),
+            log_path: dir.path().join("planner.log"),
+            timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
+        };
+        let args: Vec<String> = agent
+            .build_command(&req)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let pair = args
+            .windows(2)
+            .find(|w| w[0] == "--disallowedTools")
+            .unwrap_or_else(|| panic!("missing --disallowedTools: {args:?}"));
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            assert!(
+                pair[1].split(',').any(|t| t == tool),
+                "{tool} not in disallow list {:?}",
+                pair[1]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_command_omits_disallowed_tools_for_non_planner_roles() {
+        // Only the planner needs the lockdown — implementer/auditor/fixer
+        // legitimately use Write/Edit, so the flag must not leak onto their
+        // dispatches.
+        let dir = tempfile::tempdir().unwrap();
+        let agent = ClaudeCodeAgent::with_binary("claude");
+        for role in [Role::Implementer, Role::Auditor, Role::Fixer] {
+            let req = AgentRequest {
+                role,
+                model: "claude-opus-4-7".into(),
+                system_prompt: String::new(),
+                user_prompt: "u".into(),
+                workdir: dir.path().to_path_buf(),
+                log_path: dir.path().join(format!("{role}.log")),
+                timeout: Duration::from_secs(1),
+                env: std::collections::HashMap::new(),
+            };
+            let args: Vec<String> = agent
+                .build_command(&req)
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                !args.iter().any(|a| a == "--disallowedTools"),
+                "{role} dispatch must not carry --disallowedTools: {args:?}"
+            );
+        }
     }
 
     #[tokio::test]

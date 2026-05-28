@@ -355,7 +355,7 @@ pub struct GrindConfig {
     pub max_parallel: u32,
     /// Number of consecutive failing sessions that trip the
     /// consecutive-failure escape valve (Phase 08 exit code 5). Defaults to
-    /// `3`.
+    /// `3`; set to `0` to disable the escape valve.
     pub consecutive_failure_limit: u32,
     /// Wall-clock cap applied to each plan-level shell hook (Phase 10).
     /// Defaults to `60`.
@@ -546,9 +546,6 @@ pub fn parse(text: &str) -> Result<Config> {
 fn validate(cfg: &Config) -> Result<()> {
     if cfg.grind.max_parallel == 0 {
         anyhow::bail!("config.toml: [grind] max_parallel must be >= 1");
-    }
-    if cfg.grind.consecutive_failure_limit == 0 {
-        anyhow::bail!("config.toml: [grind] consecutive_failure_limit must be >= 1");
     }
     if cfg.grind.hook_timeout_secs == 0 {
         anyhow::bail!("config.toml: [grind] hook_timeout_secs must be >= 1");
@@ -1214,11 +1211,10 @@ max_parallel = 2
     }
 
     #[test]
-    fn consecutive_failure_limit_zero_is_rejected() {
+    fn consecutive_failure_limit_zero_disables_escape_valve() {
         let text = "[grind]\nconsecutive_failure_limit = 0\n";
-        let err = parse(text).unwrap_err();
-        let msg = format!("{:#}", err);
-        assert!(msg.contains("consecutive_failure_limit"), "msg: {msg}");
+        let cfg = parse(text).unwrap();
+        assert_eq!(cfg.grind.consecutive_failure_limit, 0);
     }
 
     #[test]

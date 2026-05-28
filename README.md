@@ -27,6 +27,7 @@ Pitboss is a Rust CLI that drives a coding agent through a multi-phase implement
 - [How it works](#how-it-works)
 - [Install](#install)
 - [Quickstart](#quickstart)
+- [Guided setup: `start`, `config`, `nuke`](#guided-setup-start-config-nuke)
 - [Generating a plan](#generating-a-plan)
 - [The run loop](#the-run-loop)
 - [Sweeps: draining the deferred backlog](#sweeps-draining-the-deferred-backlog)
@@ -76,7 +77,7 @@ Each tagged release ships static builds on the [Releases page](https://github.co
 Pick the archive that matches your platform, verify the checksum, and drop the binary on your `PATH`:
 
 ```sh
-TAG=v0.2.0                                # whichever release you want
+TAG=v0.4.0                                # whichever release you want
 TARGET=aarch64-apple-darwin               # or x86_64-apple-darwin / x86_64-unknown-linux-gnu
 ARCHIVE="pitboss-${TAG}-${TARGET}.tar.gz"
 
@@ -136,6 +137,40 @@ A few entry points worth knowing:
 - `pitboss rebuy` picks up where a halted run left off (buying back into the table).
 - `pitboss fold --checkout-original` marks the run folded and switches HEAD back to the branch you were on before `pitboss play`.
 - The pre-rename verbs (`pitboss run`, `pitboss resume`, `pitboss abort`) are kept as aliases, so existing scripts and muscle memory keep working.
+
+## Guided setup: `start`, `config`, `nuke`
+
+If you'd rather not hand-edit `config.toml` or memorize the verb table, three commands wrap the lifecycle in interactive TUIs.
+
+### `pitboss start`
+
+The one command to run when you don't know which command to run. It auto-detects whether the current directory already has a `.pitboss/` workspace:
+
+- **No workspace yet** — runs the setup wizard, scaffolds `.pitboss/`, then chains straight into `pitboss play --tui` so you go from empty directory to a live run in one command.
+- **Workspace exists** — opens the iteration wizard: a summary of your current budget, the deferred backlog, and completed phases, with paths to continue the run, force a sweep, or start a new plan.
+
+```sh
+pitboss start
+```
+
+### `pitboss config`
+
+An interactive wizard for `.pitboss/config.toml`, aliased as `pitboss setup` for backwards compatibility.
+
+- On a **fresh** workspace it walks you through every knob — models, budgets, sweeps, auditor, test command — and scaffolds the rest of `.pitboss/`.
+- On an **existing** workspace it opens straight to a summary of your current settings pulled from disk, so you can save as-is or step back through any screen to edit individual values.
+
+```sh
+pitboss config
+```
+
+### `pitboss nuke`
+
+Removes pitboss from the workspace entirely: deletes the `.pitboss/` directory — config, plan, deferred items, state, and all logs — after a `y/N` confirmation. There is no undo, so it only ever touches `.pitboss/` and never your tracked files.
+
+```sh
+pitboss nuke
+```
 
 ## Generating a plan
 
@@ -261,6 +296,8 @@ A few flags worth knowing:
 - `--pr` opens a pull request when the run finishes cleanly; `--require-pr` upgrades a failed `gh pr create` to a non-zero exit.
 - `--dry-run` resolves the rotation, prints the discovered prompts, the budget plan, and the first few scheduler picks, then exits without dispatching anything.
 
+By default, grind also stops after three consecutive failed sessions (`[grind] consecutive_failure_limit = 3`). Set that value to `0` to disable the escape valve and let ordinary budgets / Ctrl-C be the only run-level stops.
+
 Each grind run gets its own branch (`pitboss/grind/<run-id>`) and a per-run directory under `.pitboss/grind/runs/<run-id>/` containing `state.json`, the source-of-truth `sessions.jsonl` log, a rendered `sessions.md`, per-session transcripts, and (for parallel sessions) a `worktrees/` subtree.
 
 ## Configuration
@@ -299,7 +336,7 @@ final_sweep_max_iterations = 3
 
 # Per-run branch and optional PR.
 [git]
-branch_prefix = "pitboss/run-"   # full branch is <prefix><utc_timestamp>
+branch_prefix = "pitboss/play/"   # full branch is <prefix><utc_timestamp>
 create_pr     = false            # equivalent to `pitboss play --pr`
 
 # Test runner override. Leave commented to auto-detect.

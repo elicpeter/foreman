@@ -89,6 +89,7 @@ intensity = \"full\"
 [grind]
 # default_rotation = \"nightly\"
 max_parallel = 1
+# Set to 0 to keep grinding through repeated errors until a budget or Ctrl-C stops it.
 consecutive_failure_limit = 3
 ";
 

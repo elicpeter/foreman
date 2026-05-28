@@ -5,3 +5,5 @@ Cargo.lock.bak
 /.idea
 .pitboss/
 pitboss-contributions.md
+.claude
+.codex

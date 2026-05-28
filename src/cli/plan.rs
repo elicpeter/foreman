@@ -170,7 +170,8 @@ pub async fn run_with_agent<A: Agent>(
             env: std::collections::HashMap::new(),
         };
 
-        let body = dispatch_planner(agent, request).await?;
+        let raw = dispatch_planner(agent, request).await?;
+        let body = strip_outer_code_fences(&raw);
         match plan::parse(&body) {
             Ok(_) => {
                 write_atomic(&plan_path, body.as_bytes())
@@ -298,6 +299,38 @@ async fn dispatch_planner<A: Agent>(agent: &A, request: AgentRequest) -> Result<
     }
 }
 
+/// Strip a single pair of outer triple-backtick fences from the planner's
+/// reply. Models occasionally wrap the file body in ``` despite the template
+/// telling them not to; rather than failing parse, peel one wrapper if it
+/// fences the entire body. A leading fence with an optional info string
+/// (e.g. ```` ```markdown ````) is matched, and a matching closing fence on
+/// its own line at the end is required. If anything other than whitespace
+/// sits outside the fences the body is returned unchanged, since that
+/// pattern is more likely chatty commentary than a stray wrapper.
+fn strip_outer_code_fences(body: &str) -> String {
+    let trimmed = body.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return body.to_string();
+    };
+    let Some(nl) = rest.find('\n') else {
+        return body.to_string();
+    };
+    let info = &rest[..nl];
+    if info.contains("```") {
+        return body.to_string();
+    }
+    let inner = &rest[nl + 1..];
+    let Some(inner) = inner.strip_suffix("```") else {
+        return body.to_string();
+    };
+    let inner = inner.strip_suffix('\n').unwrap_or(inner);
+    let mut out = inner.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 /// Build the retry prompt by prepending a short error preamble to the
 /// canonical planner prompt. Re-rendering the canonical body each retry keeps
 /// the goal + repo summary in front of the model alongside the diagnostic.
@@ -308,8 +341,10 @@ fn prepend_retry_context(base: &str, err: &str) -> String {
          Parser error:\n\
          {err}\n\
          \n\
-         Re-emit the file from scratch — output ONLY the file contents, no \
-         commentary, no surrounding fences.\n\
+         Re-emit the file from scratch — output ONLY the file contents in your \
+         reply text. Do NOT call Write/Edit/MultiEdit; the runner writes the \
+         file from your stdout. No commentary, no surrounding ``` fences, no \
+         prose before or after the frontmatter.\n\
          \n\
          ---\n\
          \n\
@@ -757,6 +792,62 @@ current_phase: \"01\"
         assert!(summary.contains("Top-level READMEs"));
         assert!(summary.contains("[package]"));
         assert!(summary.contains("# demo"));
+    }
+
+    #[test]
+    fn strip_outer_code_fences_unwraps_full_body_wrapper() {
+        // Common LLM regression: wraps the whole file body in ``` despite
+        // the template forbidding it. The stripper peels exactly one wrapper.
+        let wrapped = "```\n---\ncurrent_phase: \"01\"\n---\n\n# Phase 01: A\n\nbody\n```\n";
+        let out = strip_outer_code_fences(wrapped);
+        assert!(plan::parse(&out).is_ok(), "expected parseable, got {out:?}");
+    }
+
+    #[test]
+    fn strip_outer_code_fences_handles_info_string() {
+        let wrapped =
+            "```markdown\n---\ncurrent_phase: \"01\"\n---\n\n# Phase 01: A\n\nbody\n```\n";
+        let out = strip_outer_code_fences(wrapped);
+        assert!(plan::parse(&out).is_ok(), "expected parseable, got {out:?}");
+    }
+
+    #[test]
+    fn strip_outer_code_fences_leaves_unfenced_body_alone() {
+        let body = "---\ncurrent_phase: \"01\"\n---\n\n# Phase 01: A\n\nbody\n";
+        assert_eq!(strip_outer_code_fences(body), body);
+    }
+
+    #[test]
+    fn strip_outer_code_fences_leaves_inner_fences_alone() {
+        // Inner fenced code blocks (e.g. example snippets inside the plan)
+        // must not be flattened; only an outer wrapper is peeled.
+        let body = "---\ncurrent_phase: \"01\"\n---\n\n# Phase 01: A\n\n```rust\nfn x() {}\n```\n";
+        assert_eq!(strip_outer_code_fences(body), body);
+    }
+
+    #[test]
+    fn strip_outer_code_fences_leaves_partial_fences_alone() {
+        // Opening fence without a matching trailing one is more likely a
+        // legitimate inner block at the start — don't mangle it.
+        let body = "```rust\nfn x() {}\n```\n\nrest of body\n";
+        assert_eq!(strip_outer_code_fences(body), body);
+    }
+
+    #[tokio::test]
+    async fn fence_wrapped_first_attempt_recovers_without_retry() {
+        // Regression: prior attempt 1 wrapped output in ``` and pitboss
+        // failed parse. With the stripper in place a fence-wrapped first
+        // body must succeed on attempt 1.
+        let dir = tempdir().unwrap();
+        let wrapped = format!("```\n{CANNED_PLAN}```\n");
+        let agent = dry_agent_emitting(&wrapped);
+        let (cfg, summary) = plan_inputs(dir.path());
+        let outcome = run_with_agent(dir.path(), "g", false, &cfg, &summary, &agent)
+            .await
+            .unwrap();
+        assert_eq!(outcome.attempts, 1);
+        let written = fs::read_to_string(paths::plan_path(dir.path())).unwrap();
+        assert_eq!(written, CANNED_PLAN);
     }
 
     #[test]

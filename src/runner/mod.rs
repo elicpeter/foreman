@@ -927,7 +927,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
     }
 
     /// Build the implementer [`AgentRequest`] for `phase`. `attempt` is the
-    /// 1-based dispatch counter the caller pulled from [`bump_attempts`]; it
+    /// 1-based dispatch counter the caller pulled from [`Self::bump_attempts`]; it
     /// flows into the per-attempt log filename so a fixer re-dispatch later in
     /// the phase does not clobber the implementer's log.
     fn implementer_request(&self, phase: &crate::plan::Phase, attempt: u32) -> AgentRequest {
