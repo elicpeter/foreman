@@ -1817,18 +1817,26 @@ impl<A: Agent, G: Git> Runner<A, G> {
         let tokens = &dispatch.outcome_tokens;
         self.state.token_usage.input += tokens.input;
         self.state.token_usage.output += tokens.output;
-        let entry = self
-            .state
-            .token_usage
-            .by_role
-            .entry(role.as_str().to_string())
-            .or_default();
-        entry.input += tokens.input;
-        entry.output += tokens.output;
-        for (k, v) in &tokens.by_role {
-            let e = self.state.token_usage.by_role.entry(k.clone()).or_default();
-            e.input += v.input;
-            e.output += v.output;
+        // Agents re-key their per-role usage onto `tokens.by_role` keyed by the
+        // dispatch role, so prefer that and never also add it under `role` —
+        // doing both double-counts the role and inflates `budget_totals` cost.
+        // Fall back to the explicit `role` only when an agent leaves `by_role`
+        // empty.
+        if tokens.by_role.is_empty() {
+            let entry = self
+                .state
+                .token_usage
+                .by_role
+                .entry(role.as_str().to_string())
+                .or_default();
+            entry.input += tokens.input;
+            entry.output += tokens.output;
+        } else {
+            for (k, v) in &tokens.by_role {
+                let e = self.state.token_usage.by_role.entry(k.clone()).or_default();
+                e.input += v.input;
+                e.output += v.output;
+            }
         }
         let _ = self
             .events_tx
